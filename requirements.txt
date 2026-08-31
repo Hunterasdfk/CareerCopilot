@@ -1,0 +1,11 @@
+# CareerCopilot MVP 0.1 核心依赖
+# 技术栈：Python 3.11 + Streamlit + SQLite + pandas + openpyxl + pytest
+# 说明：
+# - SQLite 由 Python 标准库 sqlite3 提供，无需单独安装；
+# - 不引入 SQLAlchemy / SQLModel（见 docs/ARCHITECTURE.md §3 极简原则）；
+# - Playwright / Gmail API / Apprise 属后续版本，不在 MVP 0.1 范围。
+
+streamlit>=1.28.0
+pandas>=2.0.0
+openpyxl>=3.1.0
+pytest>=7.4.0
