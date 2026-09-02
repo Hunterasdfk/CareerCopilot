@@ -40,7 +40,9 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Any
 
 # ---------------------------------------------------------------------------
@@ -433,6 +435,357 @@ def _suggest_record_type_from_title(title_value: object) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# 表头解析（任务 11A.1：表头驱动识别）
+# ---------------------------------------------------------------------------
+
+# 表头别名表：标准字段 → 别名列表（精确匹配规范化后的表头，不做子字符串匹配）
+_HEADER_ALIASES: dict[str, tuple[str, ...]] = {
+    "company_name": (
+        "企业名称", "公司名称", "公司", "雇主", "employer", "company",
+    ),
+    "job_title": (
+        "岗位名称", "招聘岗位", "职位名称", "职位", "岗位",
+        "job title", "position",
+    ),
+    "job_description": (
+        "职位简介", "岗位描述", "职位描述", "工作内容", "jd", "description",
+    ),
+    "industry": ("行业", "所属行业", "行业类别", "industry"),
+    "recruitment_type": (
+        "招聘类别", "招聘类型", "招聘性质", "用工类型", "employment type",
+    ),
+    "target_cohort": (
+        "招聘对象（届次）", "招聘对象", "目标届次", "招聘届次", "届次",
+        "target cohort",
+    ),
+    "education_requirement": (
+        "学历要求", "学历", "education", "education requirement",
+    ),
+    "location": (
+        "工作城市", "工作地点", "职位地点", "地点", "城市", "location",
+    ),
+    "deadline": (
+        "截止时间", "截止日期", "投递截止", "申请截止", "deadline",
+    ),
+    "announcement_title": ("公告名称", "公告标题", "招聘公告"),
+    "announcement_url": ("公告链接", "公告地址"),
+    "application_url": (
+        "投递链接", "申请链接", "职位链接", "岗位链接", "application url",
+    ),
+    "generic_url": ("链接", "网址", "url"),
+}
+
+# 连续空白（含换行、Tab、全角空格等）
+_HEADER_WHITESPACE_PATTERN = re.compile(r"\s+")
+
+
+def normalize_header(value: object) -> str:
+    """规范化表头文本（任务 11A.1）。
+
+    处理：
+    - 前后空格、换行和连续空白（统一删除）；
+    - 英文大小写（casefold）；
+    - 全角/半角括号与标点（NFKC）；
+    - 空表头（None / 空串 → ""）。
+
+    返回规范化文本；空表头返回 ""。
+    """
+    if value is None:
+        return ""
+    text = unicodedata.normalize("NFKC", str(value))
+    text = text.casefold()
+    text = _HEADER_WHITESPACE_PATTERN.sub("", text)
+    return text.strip()
+
+
+def _build_alias_lookup() -> dict[str, tuple[str, ...]]:
+    """构建 规范化别名 → 标准字段元组 的查找表。"""
+    lookup: dict[str, list[str]] = {}
+    for field_name, aliases in _HEADER_ALIASES.items():
+        for alias in aliases:
+            key = normalize_header(alias)
+            if not key:
+                continue
+            lookup.setdefault(key, [])
+            if field_name not in lookup[key]:
+                lookup[key].append(field_name)
+    return {k: tuple(v) for k, v in lookup.items()}
+
+
+# 预计算别名查找表（模块级常量，不可变）
+_ALIAS_LOOKUP: dict[str, tuple[str, ...]] = _build_alias_lookup()
+
+
+@dataclass
+class HeaderMapping:
+    """表头映射结果（任务 11A.1，可独立测试）。
+
+    Attributes:
+        field_to_col: 标准字段 → 列字母。
+        col_to_field: 列字母 → 标准字段。
+        normalized_headers: 列字母 → 规范化表头（仅非空表头）。
+        duplicates: 参与重复/同字段冲突的列字母列表（这些列不参与映射）。
+        alias_conflict: 是否存在单个表头命中多个标准字段的别名冲突。
+    """
+
+    field_to_col: dict[str, str] = field(default_factory=dict)
+    col_to_field: dict[str, str] = field(default_factory=dict)
+    normalized_headers: dict[str, str] = field(default_factory=dict)
+    duplicates: tuple[str, ...] = ()
+    alias_conflict: bool = False
+
+    @property
+    def conflicts(self) -> bool:
+        """表头是否存在重复或冲突（冲突时不得静默选择第一个）。"""
+        return bool(self.duplicates) or self.alias_conflict
+
+    @property
+    def has_mapping(self) -> bool:
+        """是否至少有一个表头成功映射到标准字段。"""
+        return bool(self.field_to_col)
+
+
+def resolve_header_mapping(headers: Mapping[object, object] | None) -> HeaderMapping:
+    """把 列字母 → 原始表头 映射解析为 HeaderMapping（任务 11A.1）。
+
+    规则：
+    - 空表头（None / 规范化后为空）不参与映射；
+    - 重复表头（多个列规范化后相同）：这些列全部不参与映射，
+      不得静默选择第一个，记录到 duplicates；
+    - 一个表头命中多个标准字段（别名冲突）：该列不参与映射，
+      记录 alias_conflict；
+    - 多个列命中同一标准字段：这些列同样视为重复冲突（ambiguous）。
+    """
+    normalized: dict[str, str] = {}
+    for col, text in (headers or {}).items():
+        norm = normalize_header(text)
+        if norm:
+            normalized[str(col)] = norm
+
+    # 重复表头检测：相同规范化文本出现多次 → 全部不映射
+    seen: dict[str, str] = {}
+    duplicate_cols: list[str] = []
+    for col, norm in normalized.items():
+        if norm in seen:
+            if seen[norm] not in duplicate_cols:
+                duplicate_cols.append(seen[norm])
+            duplicate_cols.append(col)
+        else:
+            seen[norm] = col
+    duplicate_set = set(duplicate_cols)
+
+    field_to_col: dict[str, str] = {}
+    col_to_field: dict[str, str] = {}
+    alias_conflict = False
+
+    for col, norm in normalized.items():
+        if col in duplicate_set:
+            continue
+        fields = _ALIAS_LOOKUP.get(norm)
+        if not fields:
+            continue
+        if len(fields) > 1:
+            # 单个表头命中多个标准字段（别名表冲突），不得静默选择
+            alias_conflict = True
+            continue
+        field_name = fields[0]
+        if field_name in field_to_col:
+            # 多个不同表头列命中同一标准字段 → 歧义，全部不映射
+            prev_col = field_to_col.pop(field_name)
+            col_to_field.pop(prev_col, None)
+            if prev_col not in duplicate_cols:
+                duplicate_cols.append(prev_col)
+            duplicate_cols.append(col)
+            duplicate_set.add(prev_col)
+            duplicate_set.add(col)
+            continue
+        field_to_col[field_name] = col
+        col_to_field[col] = field_name
+
+    return HeaderMapping(
+        field_to_col=field_to_col,
+        col_to_field=col_to_field,
+        normalized_headers=normalized,
+        duplicates=tuple(duplicate_cols),
+        alias_conflict=alias_conflict,
+    )
+
+
+def _is_valid_job_title_value(value: object) -> bool:
+    """判断 job_title 列的取值是否为有效职位名称（任务 11A.1）。
+
+    与 _is_job_title_like 的区别：**不要求**包含"工程师/开发"等岗位关键词，
+    只排除明显不是职位的取值：
+    - 招聘类型关键词（如"秋招全职"——旧模板把招聘类型放在职位名称列）；
+    - 届次、学历、URL、日期；
+    - 描述性前缀（如"负责…"）。
+    """
+    if value is None:
+        return False
+    text = str(value).strip()
+    if not text:
+        return False
+    if _is_recruitment_keyword(text) or _is_cohort(text) or _is_education(text):
+        return False
+    if _is_url(text) or _is_date(text):
+        return False
+    if any(text.startswith(prefix) for prefix in _DESCRIPTION_PREFIXES):
+        return False
+    return True
+
+
+# 表头可靠性检查：映射到这些语义受控字段的**非空值**必须通过语义校验，
+# 否则视为表头与数据不一致（不可靠表头），回退固定列位置规则。
+# 检查表 _HEADER_SEMANTIC_CHECKS 在 is_valid_url 定义之后构建。
+
+
+def _check_header_value_reliability(
+    row: Mapping, hm: HeaderMapping
+) -> bool:
+    """检查行值与表头语义是否一致（任务 11A.1）。
+
+    只有全部语义受控字段的非空值都通过校验时，表头才被视为可靠；
+    旧模板数据（表头存在但个别行数据错位）会在此失败并回退固定列规则。
+    """
+    for field_name, checker in _HEADER_SEMANTIC_CHECKS.items():
+        col = hm.field_to_col.get(field_name)
+        if col is None:
+            continue
+        value = row.get(col)
+        if value is None or str(value).strip() == "":
+            continue
+        if not checker(value):
+            return False
+    return True
+
+
+# job 分类支持字段：至少存在其一（映射存在且值非空）才可判 job
+_JOB_SUPPORT_FIELDS: tuple[str, ...] = (
+    "job_description",
+    "recruitment_type",
+    "target_cohort",
+    "education_requirement",
+    "location",
+    "application_url",
+    "generic_url",
+)
+
+# 表头驱动布局生成的标准字段（job / campaign 共用主体）
+_HEADER_JOB_STD_FIELDS: tuple[str, ...] = (
+    "company_name",
+    "job_title",
+    "industry",
+    "recruitment_type",
+    "target_cohort",
+    "education_requirement",
+    "location",
+    "deadline",
+    "announcement_title",
+    "announcement_url",
+    "application_url",
+)
+_HEADER_CAMPAIGN_STD_FIELDS: tuple[str, ...] = (
+    "company_name",
+    "industry",
+    "recruitment_type",
+    "target_cohort",
+    "education_requirement",
+    "location",
+    "deadline",
+    "announcement_title",
+    "announcement_url",
+    "application_url",
+)
+
+
+def _header_col_value_nonempty(row: Mapping, hm: HeaderMapping, field_name: str) -> bool:
+    """字段有映射且对应行值非空。"""
+    col = hm.field_to_col.get(field_name)
+    if col is None:
+        return False
+    value = row.get(col)
+    return value is not None and str(value).strip() != ""
+
+
+def _build_header_mapping_dict(
+    row: Mapping, hm: HeaderMapping, fields: tuple[str, ...]
+) -> dict[str, str]:
+    """按表头映射构建 列字母 → 标准字段 的 _apply_mapping 映射表。
+
+    generic_url 特殊处理：仅当没有明确的 application_url 表头、
+    且其值为有效 http/https URL 时，才作为 application_url。
+    """
+    mapping: dict[str, str] = {}
+    for field_name in fields:
+        col = hm.field_to_col.get(field_name)
+        if col is not None:
+            mapping[col] = field_name
+    if "application_url" not in mapping:
+        gcol = hm.field_to_col.get("generic_url")
+        if gcol is not None and is_valid_url(row.get(gcol)):
+            mapping[gcol] = "application_url"
+    return mapping
+
+
+def _classify_mainland_header_driven(
+    row: Mapping, hm: HeaderMapping, source_row: int
+) -> dict[str, Any] | None:
+    """表头驱动分类（任务 11A.1）。返回 None 表示回退固定列规则。
+
+    优先级：
+    1. job：company_name + 有效 job_title 值 + 至少一个支持字段；
+       - job_title 无需包含岗位关键词，但不得是招聘类型/届次/学历/URL/日期/描述；
+       - "社招全职 + 2025/2026届" 不会把含明确职位名称的记录判为 campaign；
+    2. campaign：公告标题非空，或 招聘类型 + 届次均非空 且无有效职位名称；
+    3. 其余回退固定列规则（None）。
+    """
+    company_ok = _header_col_value_nonempty(row, hm, "company_name")
+    title_col = hm.field_to_col.get("job_title")
+    title_ok = _is_valid_job_title_value(row.get(title_col)) if title_col else False
+
+    if title_ok:
+        if not company_ok:
+            # 职位名称明确但公司值为空：必要字段为空
+            return _build_unknown_record(
+                row, SHEET_MAINLAND, source_row,
+                detection_reason="missing_required_job_values",
+            )
+        if not any(
+            _header_col_value_nonempty(row, hm, f) for f in _JOB_SUPPORT_FIELDS
+        ):
+            # 有公司 + 职位但无任何支持字段：签名不完整
+            return _build_unknown_record(
+                row, SHEET_MAINLAND, source_row,
+                detection_reason="incomplete_header_signature",
+            )
+        return _apply_mapping(
+            row,
+            _build_header_mapping_dict(row, hm, _HEADER_JOB_STD_FIELDS),
+            "job",
+            LAYOUT_MAINLAND_HEADER_JOB,
+            SHEET_MAINLAND,
+            source_row,
+            job_title_required=True,
+        )
+
+    # job 不成立 → 尝试 campaign
+    has_recruit = _header_col_value_nonempty(row, hm, "recruitment_type")
+    has_cohort = _header_col_value_nonempty(row, hm, "target_cohort")
+    has_announcement = _header_col_value_nonempty(row, hm, "announcement_title")
+    if (has_recruit and has_cohort) or has_announcement:
+        if _header_col_value_nonempty(row, hm, "company_name") or has_announcement:
+            return _apply_mapping(
+                row,
+                _build_header_mapping_dict(row, hm, _HEADER_CAMPAIGN_STD_FIELDS),
+                "campaign",
+                LAYOUT_MAINLAND_HEADER_CAMPAIGN,
+                SHEET_MAINLAND,
+                source_row,
+            )
+    return None
+
+
+# ---------------------------------------------------------------------------
 # 工具：URL 校验与 raw_data 构造
 # ---------------------------------------------------------------------------
 
@@ -444,6 +797,21 @@ def is_valid_url(value: object) -> bool:
     if value is None:
         return False
     return bool(_URL_SCHEME_PATTERN.match(str(value).strip()))
+
+
+# 表头可靠性检查表（任务 11A.1）：映射到这些语义受控字段的非空值
+# 必须通过语义校验，否则视为表头与数据不一致，回退固定列位置规则。
+# URL 类字段不参与可靠性检查：URL 有效性只在字段生成时校验
+# （无效 URL 不映射到标准字段），避免轻微链接问题导致整表回退。
+# 在 is_valid_url 定义之后构建，避免模块加载顺序问题。
+_HEADER_SEMANTIC_CHECKS: dict[str, Any] = {
+    "recruitment_type": _is_recruitment_keyword,
+    "target_cohort": _is_cohort,
+    "education_requirement": _is_education,
+    "location": is_city,
+    "deadline": lambda v: _is_date(v)
+    or bool(re.match(r"^\d{4}-\d{1,2}-\d{1,2}$", str(v).strip())),
+}
 
 
 def _build_raw_data(row: Mapping) -> dict[str, Any]:
@@ -462,6 +830,9 @@ def _build_raw_data(row: Mapping) -> dict[str, Any]:
 # 中国大陆（实证已确认，可直接入库）
 LAYOUT_MAINLAND_CAMPAIGN = "mainland_campaign_v2"
 LAYOUT_MAINLAND_JOB = "mainland_job_v1"
+# 中国大陆表头驱动布局（任务 11A.1，可直接入库）
+LAYOUT_MAINLAND_HEADER_JOB = "header_mapped_job_v1"
+LAYOUT_MAINLAND_HEADER_CAMPAIGN = "header_mapped_campaign_v1"
 # 中国香港（候选，需人工复核）
 LAYOUT_HK_STANDARD = "hk_standard_candidate"
 LAYOUT_HK_SHIFTED = "hk_shifted_candidate"
@@ -826,13 +1197,19 @@ def _value_matches_field(field_name: str, value: object) -> bool:
 # 各工作表判定函数
 # ---------------------------------------------------------------------------
 
-# detection_reason 中文显示映射（任务 11A）
+# detection_reason 中文显示映射（任务 11A；任务 11A.1 增补表头相关原因）
 DETECTION_REASON_DISPLAY: dict[str, str] = {
     "unrecognized_cohort": "届次格式无法识别",
     "unrecognized_recruitment_type": "招聘类型无法识别",
     "unrecognized_location": "工作地点无法识别",
     "incomplete_layout_signature": "布局签名不完整",
     "missing_required_source_fields": "缺少必填源字段",
+    # 任务 11A.1 表头相关原因
+    "missing_required_headers": "缺少可靠的公司或职位表头",
+    "ambiguous_source_headers": "表头重复或冲突，无法安全确定语义",
+    "conflicting_header_mapping": "表头与多个字段冲突",
+    "missing_required_job_values": "必要字段值为空",
+    "incomplete_header_signature": "表头结构不完整，缺少支持字段",
 }
 
 
@@ -899,13 +1276,8 @@ def _determine_mainland_unknown_reason(
     return "incomplete_layout_signature"
 
 
-def detect_mainland(row: Mapping, source_row: int) -> dict[str, Any]:
-    """中国大陆逐行判定 campaign / job / unknown（§3.3，任务 11A 扩展）。
-
-    新增多字段签名判定：当 E/F/G 非空且 H/I/J 分别符合招聘类型、届次、
-    学历语义时，即使 F 不含岗位关键词或 G 含"全国多地/海外"等，
-    也可可靠判断为 mainland_job_v1。
-    """
+def _detect_mainland_fixed(row: Mapping, source_row: int) -> dict[str, Any]:
+    """中国大陆固定列位置判定（旧版布局回退，任务 11A 逻辑保持不变）。"""
     f_val = row.get("F")
     g_val = row.get("G")
     f_cls = _classify_mainland_f(f_val)
@@ -948,6 +1320,54 @@ def detect_mainland(row: Mapping, source_row: int) -> dict[str, Any]:
     return _build_unknown_record(
         row, SHEET_MAINLAND, source_row, detection_reason=reason
     )
+
+
+def detect_mainland(
+    row: Mapping, source_row: int, headers: Mapping[object, object] | None = None
+) -> dict[str, Any]:
+    """中国大陆逐行判定 campaign / job / unknown（§3.3，任务 11A.1）。
+
+    判定顺序：
+    1. **表头驱动优先**：传入表头且解析出可靠映射（无重复/冲突，
+       且语义受控字段的非空值都通过语义校验）时，按表头语义分类，
+       生成 header_mapped_job_v1 / header_mapped_campaign_v1；
+       列顺序变化不影响结果；
+    2. **固定列位置回退**：缺少表头、表头无别名命中、表头与数据
+       语义不一致（旧模板错位）或表头驱动无法判定时，沿用任务 11A
+       的固定列规则（mainland_campaign_v2 / mainland_job_v1）；
+    3. 表头冲突时回退固定列；若最终 unknown，detection_reason 优先
+       使用表头冲突原因（ambiguous_source_headers）。
+
+    不使用任何全局可变状态；表头映射通过参数显式传入。
+    """
+    if headers:
+        hm = resolve_header_mapping(headers)
+        if hm.conflicts:
+            # 表头重复/冲突 → 不得静默选择，回退固定列；
+            # 固定列也判 unknown 时，用表头冲突原因
+            result = _detect_mainland_fixed(row, source_row)
+            if result["record_type"] == "unknown":
+                if hm.duplicates:
+                    result["detection_reason"] = "ambiguous_source_headers"
+                elif hm.alias_conflict:
+                    result["detection_reason"] = "conflicting_header_mapping"
+            return result
+        if hm.has_mapping and _check_header_value_reliability(row, hm):
+            driven = _classify_mainland_header_driven(row, hm, source_row)
+            if driven is not None:
+                return driven
+            # 表头可靠但分类未成立 → 回退固定列；unknown 时若缺
+            # company_name / job_title 表头，用表头视角原因
+            result = _detect_mainland_fixed(row, source_row)
+            if result["record_type"] == "unknown":
+                if (
+                    "company_name" not in hm.field_to_col
+                    or "job_title" not in hm.field_to_col
+                ):
+                    result["detection_reason"] = "missing_required_headers"
+            return result
+        # 表头与数据语义不一致（旧模板错位）或无别名命中 → 固定列
+    return _detect_mainland_fixed(row, source_row)
 
 
 def detect_hk(row: Mapping, source_row: int) -> dict[str, Any]:
@@ -1215,13 +1635,21 @@ _SHEET_DETECTORS: dict[str, Any] = {
 }
 
 
-def detect_row(sheet_name: str, row: Mapping, source_row: int) -> dict[str, Any]:
+def detect_row(
+    sheet_name: str,
+    row: Mapping,
+    source_row: int,
+    headers: Mapping[object, object] | None = None,
+) -> dict[str, Any]:
     """按工作表名路由到对应判定函数。
 
     Args:
         sheet_name: 工作表名。
         row: 原始行（键为列字母 A/B/C...）。
         source_row: 来源行号（1-based，对应原文件物理行号，含表头）。
+        headers: 列字母 → 原始表头文本（任务 11A.1，可选）。
+            仅中国大陆判定函数使用；其余工作表忽略。
+            通过参数显式传递，不使用全局可变状态。
 
     Returns:
         标准化 Opportunity 记录 dict，含 record_type / layout / raw_data /
@@ -1236,6 +1664,8 @@ def detect_row(sheet_name: str, row: Mapping, source_row: int) -> dict[str, Any]
         raise UnsupportedSheetError(
             f"不支持的工作表：{sheet_name}（支持：{sorted(SUPPORTED_SHEETS)}）"
         )
+    if sheet_name == SHEET_MAINLAND:
+        return detector(row, source_row, headers=headers)
     return detector(row, source_row)
 
 

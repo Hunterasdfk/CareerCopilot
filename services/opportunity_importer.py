@@ -131,6 +131,13 @@ def parse_sheet(
     records: list[dict[str, Any]] = []
     columns = list(df.columns)
 
+    # 任务 11A.1：建立 列字母 → 原始表头 映射，显式传给 detector。
+    # 空表头（NaN）→ None，不参与表头驱动解析。
+    headers: dict[str, str | None] = {}
+    for i, col in enumerate(columns):
+        letter = _column_letter(i)
+        headers[letter] = None if pd.isna(col) else str(col)
+
     # 使用 enumerate(start=2) 按行位置计算物理行号（修复点 5），
     # 不依赖 DataFrame index 一定能转换为 int（如自定义字符串 index）。
     # 表头占第 1 行，第一条数据行 physical_row=2，空行跳过但占用行号。
@@ -138,7 +145,7 @@ def parse_sheet(
         row_dict = _row_to_letter_dict(row_series, columns)
         if _is_empty_row(row_dict):
             continue  # 空行不输出记录，但占用行号
-        record = detect_row(sheet_name, row_dict, physical_row)
+        record = detect_row(sheet_name, row_dict, physical_row, headers=headers)
         records.append(record)
 
     return records
