@@ -41,7 +41,7 @@ import streamlit as st
 
 from database.db_handler import get_connection, get_preview_connection, init_db
 from services.dedup_service import preview_identifier
-from services.layout_detector import SUPPORTED_SHEETS
+from services.layout_detector import SUPPORTED_SHEETS, get_detection_reason_display
 from services.opportunity_importer import (
     list_workbook_sheets,
     parse_csv,
@@ -147,6 +147,7 @@ def _render_preview_rows(records: list[dict]) -> pd.DataFrame:
             "布局": rec.get("layout"),
             "标题/公司": rec.get("display_title") or rec.get("company_name") or "",
             "待人工确认": "是" if rec.get("needs_confirmation") else "",
+            "原因": get_detection_reason_display(rec.get("detection_reason")),
         }
         for rec in records
     ]
@@ -303,6 +304,9 @@ else:
             f"{rec.get('source_sheet')} 第 {rec.get('source_row')} 行"
             f"（布局：{rec.get('layout')}）"
         ):
+            reason = get_detection_reason_display(rec.get("detection_reason"))
+            if reason:
+                st.write(f"识别原因：{reason}")
             suggestion_text = (
                 str(suggestion) if suggestion else "无（不提供最终建议）"
             )

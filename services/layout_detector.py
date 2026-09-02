@@ -72,7 +72,7 @@ SUPPORTED_SHEETS: frozenset[str] = frozenset(
 # 取值分类器（基于 docs/WORKBOOK_PROFILE.md §3 / §3.5 的实证语义）
 # ---------------------------------------------------------------------------
 
-# 中国大陆 campaign 布局的招聘类型关键词（§3.1 / §8）
+# 中国大陆 campaign 布局的招聘类型关键词（§3.1 / §8，任务 11A 扩展）
 _RECRUITMENT_KEYWORDS: frozenset[str] = frozenset(
     {
         "秋招全职",
@@ -82,6 +82,9 @@ _RECRUITMENT_KEYWORDS: frozenset[str] = frozenset(
         "秋招实习",
         "春招实习",
         "实习生招聘",
+        "秋招提前批",
+        "暑假实习",
+        "社招全职",
         "秋招",
         "春招",
     }
@@ -89,6 +92,12 @@ _RECRUITMENT_KEYWORDS: frozenset[str] = frozenset(
 
 # 届次正则：如 2026届、2027届、2026 届
 _COHORT_PATTERN = re.compile(r"^\s*\d{4}\s*届\s*$")
+
+# 多届次分隔符：/、-、,、，、
+_COHORT_SEPARATORS_PATTERN = re.compile(r"[/\-，,、]")
+
+# 单个届次部分：4 位年份 + 可选"届"（如 2026、2026届）
+_COHORT_PART_PATTERN = re.compile(r"^\d{4}\s*届?$")
 # 学历关键词（§3.5）
 _EDUCATION_KEYWORDS: frozenset[str] = frozenset(
     {"大专", "本科", "硕士", "博士", "学历不限", "本科及以上", "硕士及以上"}
@@ -131,6 +140,17 @@ _KNOWN_REGIONS: frozenset[str] = frozenset(
     }
 )
 
+# 特殊地区表达（任务 11A 新增）
+_SPECIAL_REGIONS: frozenset[str] = frozenset(
+    {
+        "全国",
+        "全国多地",
+        "多地",
+        "海外",
+        "远程",
+    }
+)
+
 # 合理地区后缀（地名以这些结尾视为可识别地区）
 _REGION_SUFFIXES: tuple[str, ...] = (
     "市", "省", "自治区", "特别行政区",
@@ -145,16 +165,69 @@ _LOCATION_SEPARATORS_PATTERN = re.compile(r"[/\-、,，;；\s]+")
 
 
 def _is_cohort(value: object) -> bool:
-    """判断是否为届次取值（如 2026届）。"""
+    """判断是否为届次取值（任务 11A 扩展）。
+
+    支持格式：
+    - 单届次：2027届、2026 届
+    - 多届次（分隔符 / - , ， 、）：
+      - 2026/2027届
+      - 2024/2025/2026届
+      - 2026届/2027届
+      - 2026届,2027届
+      - 2026届、2027届
+      - 2026-2027届
+
+    必须继续拒绝日期、URL 和普通描述。
+    """
     if value is None:
         return False
-    return bool(_COHORT_PATTERN.match(str(value)))
+    text = str(value).strip()
+    if not text:
+        return False
+    # 先拒绝日期和 URL
+    if _is_date(text) or _is_url(text):
+        return False
+    # 单届次
+    if _COHORT_PATTERN.match(text):
+        return True
+    # 多届次：按分隔符切分，每个部分都必须是 4 位年份（+可选"届"），
+    # 且整体必须包含至少一个"届"字
+    parts = _COHORT_SEPARATORS_PATTERN.split(text)
+    if len(parts) > 1:
+        if "届" not in text:
+            return False
+        for part in parts:
+            part = part.strip()
+            if not part or not _COHORT_PART_PATTERN.match(part):
+                return False
+        return True
+    return False
 
 
 def _is_recruitment_keyword(value: object) -> bool:
+    """判断是否为招聘类型关键词（任务 11A 扩展）。
+
+    支持组合类型（如"秋招全职/日常实习"），先按 / 切分，
+    各部分都必须在 _RECRUITMENT_KEYWORDS 白名单中才视为招聘类型。
+    不得把任意非空文本都当作招聘类型。
+    """
     if value is None:
         return False
-    return str(value).strip() in _RECRUITMENT_KEYWORDS
+    text = str(value).strip()
+    if not text:
+        return False
+    # 先拒绝日期、URL、届次、学历
+    if _is_date(text) or _is_url(text) or _is_cohort(text) or _is_education(text):
+        return False
+    # 单一关键词
+    if text in _RECRUITMENT_KEYWORDS:
+        return True
+    # 组合类型：按 / 切分，各部分都必须在白名单中
+    if "/" in text:
+        parts = [p.strip() for p in text.split("/")]
+        if len(parts) > 1 and all(p in _RECRUITMENT_KEYWORDS for p in parts):
+            return True
+    return False
 
 
 def _is_education(value: object) -> bool:
@@ -214,7 +287,8 @@ def _is_date(value: object) -> bool:
 def _is_single_region(text: str) -> bool:
     """判断单个非空字符串是否为可识别地区。
 
-    规则：
+    规则（任务 11A 扩展）：
+    - 特殊地区表达（全国/全国多地/多地/海外/远程）直接识别；
     - 知名地区词直接识别；
     - 以合理地区后缀结尾视为可识别；
     - 其余（含 URL、日期、届次、学历、普通描述）一律拒绝。
@@ -224,6 +298,8 @@ def _is_single_region(text: str) -> bool:
     # 先拒绝 URL/日期/届次/学历（即使含地区后缀也不许混入）
     if _is_url(text) or _is_date(text) or _is_cohort(text) or _is_education(text):
         return False
+    if text in _SPECIAL_REGIONS:
+        return True
     if text in _KNOWN_REGIONS:
         return True
     if any(text.endswith(suffix) for suffix in _REGION_SUFFIXES):
@@ -750,9 +826,86 @@ def _value_matches_field(field_name: str, value: object) -> bool:
 # 各工作表判定函数
 # ---------------------------------------------------------------------------
 
+# detection_reason 中文显示映射（任务 11A）
+DETECTION_REASON_DISPLAY: dict[str, str] = {
+    "unrecognized_cohort": "届次格式无法识别",
+    "unrecognized_recruitment_type": "招聘类型无法识别",
+    "unrecognized_location": "工作地点无法识别",
+    "incomplete_layout_signature": "布局签名不完整",
+    "missing_required_source_fields": "缺少必填源字段",
+}
+
+
+def get_detection_reason_display(reason: str | None) -> str:
+    """获取 detection_reason 的中文显示。"""
+    if not reason:
+        return ""
+    return DETECTION_REASON_DISPLAY.get(reason, reason)
+
+
+def _has_mainland_job_signature(row: Mapping) -> bool:
+    """中国大陆 job 多字段签名判定（任务 11A）。
+
+    当 E、F、G 非空，且 H/I/J 分别符合招聘类型、届次、学历语义时，
+    即使 F 不含"工程师"等关键词，或 G 含"全国多地/海外/非常见城市"，
+    也可可靠判断为 mainland_job_v1。
+
+    不得仅凭 F、G 两个普通非空字段强行判 job。
+    """
+    e_val = row.get("E")  # 公司名称
+    f_val = row.get("F")  # 岗位名称或岗位类别
+    g_val = row.get("G")  # 工作地点
+    h_val = row.get("H")  # 招聘类型
+    i_val = row.get("I")  # 目标届次
+    j_val = row.get("J")  # 学历要求
+
+    # E、F、G 必须非空
+    if not e_val or not str(e_val).strip():
+        return False
+    if not f_val or not str(f_val).strip():
+        return False
+    if not g_val or not str(g_val).strip():
+        return False
+    # H/I/J 分别符合招聘类型、届次、学历语义
+    if not _is_recruitment_keyword(h_val):
+        return False
+    if not _is_cohort(i_val):
+        return False
+    if not _is_education(j_val):
+        return False
+    return True
+
+
+def _determine_mainland_unknown_reason(
+    row: Mapping, f_cls: str, g_cls: str
+) -> str:
+    """确定中国大陆 unknown 的具体原因（任务 11A）。"""
+    e_val = row.get("E")
+    # 缺少必填源字段
+    if e_val is None or str(e_val).strip() == "":
+        return "missing_required_source_fields"
+    if f_cls == "empty" or g_cls == "empty":
+        return "missing_required_source_fields"
+    # F 是招聘关键词但 G 不是届次
+    if f_cls == "kw" and g_cls != "cohort":
+        return "unrecognized_cohort"
+    # F 是 other（非招聘关键词、非岗位名称）
+    if f_cls == "other":
+        return "unrecognized_recruitment_type"
+    # G 是 other
+    if g_cls == "other":
+        return "unrecognized_location"
+    # 其余情况
+    return "incomplete_layout_signature"
+
 
 def detect_mainland(row: Mapping, source_row: int) -> dict[str, Any]:
-    """中国大陆逐行判定 campaign / job / unknown（§3.3）。"""
+    """中国大陆逐行判定 campaign / job / unknown（§3.3，任务 11A 扩展）。
+
+    新增多字段签名判定：当 E/F/G 非空且 H/I/J 分别符合招聘类型、届次、
+    学历语义时，即使 F 不含岗位关键词或 G 含"全国多地/海外"等，
+    也可可靠判断为 mainland_job_v1。
+    """
     f_val = row.get("F")
     g_val = row.get("G")
     f_cls = _classify_mainland_f(f_val)
@@ -779,8 +932,22 @@ def detect_mainland(row: Mapping, source_row: int) -> dict[str, Any]:
             source_row,
             job_title_required=True,
         )
-    # 其余一律 unknown
-    return _build_unknown_record(row, SHEET_MAINLAND, source_row)
+    # job 多字段签名判定（任务 11A 新增）
+    if _has_mainland_job_signature(row):
+        return _apply_mapping(
+            row,
+            _MAINLAND_JOB_MAP,
+            "job",
+            LAYOUT_MAINLAND_JOB,
+            SHEET_MAINLAND,
+            source_row,
+            job_title_required=True,
+        )
+    # 其余一律 unknown，附带 detection_reason
+    reason = _determine_mainland_unknown_reason(row, f_cls, g_cls)
+    return _build_unknown_record(
+        row, SHEET_MAINLAND, source_row, detection_reason=reason
+    )
 
 
 def detect_hk(row: Mapping, source_row: int) -> dict[str, Any]:
@@ -996,17 +1163,40 @@ def detect_junior_official(row: Mapping, source_row: int) -> dict[str, Any]:
 
 
 def _build_unknown_record(
-    row: Mapping, source_sheet: str, source_row: int
+    row: Mapping,
+    source_sheet: str,
+    source_row: int,
+    *,
+    detection_reason: str | None = None,
 ) -> dict[str, Any]:
-    """构造 unknown 记录：保留完整 raw_data，不强行映射业务字段。"""
-    return {
+    """构造 unknown 记录：保留完整 raw_data，不强行映射业务字段。
+
+    任务 11A：
+    - 中国大陆预览优先级改为 L > E > F > 其他回退值（不得优先显示 C 列）；
+    - 新增 detection_reason 字段，帮助用户判断 unknown 原因。
+    """
+    # display_title 优先级按工作表区分
+    if source_sheet == SHEET_MAINLAND:
+        # 中国大陆：L 公告标题 > E 企业名称 > F 岗位/招聘类型 > 其他
+        display = str(
+            row.get("L") or row.get("E") or row.get("F")
+            or row.get("D") or row.get("C") or ""
+        )[:200]
+    else:
+        # 其他工作表：保持原有优先级
+        display = str(row.get("C") or row.get("D") or row.get("E") or "")[:200]
+
+    record: dict[str, Any] = {
         "record_type": "unknown",
         "source_sheet": source_sheet,
         "source_row": source_row,
         "layout": LAYOUT_UNKNOWN,
         "raw_data": _build_raw_data(row),
-        "display_title": str(row.get("C") or row.get("D") or row.get("E") or "")[:200],
+        "display_title": display,
     }
+    if detection_reason:
+        record["detection_reason"] = detection_reason
+    return record
 
 
 # ---------------------------------------------------------------------------
