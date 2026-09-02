@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -74,7 +74,8 @@ SUPPORTED_SHEETS: frozenset[str] = frozenset(
 # 取值分类器（基于 docs/WORKBOOK_PROFILE.md §3 / §3.5 的实证语义）
 # ---------------------------------------------------------------------------
 
-# 中国大陆 campaign 布局的招聘类型关键词（§3.1 / §8，任务 11A 扩展）
+# 中国大陆 campaign 布局的招聘类型关键词（§3.1 / §8，任务 11A/11A.2 扩展）。
+# 所有原子类型集中在本白名单，判断函数不得散落硬编码。
 _RECRUITMENT_KEYWORDS: frozenset[str] = frozenset(
     {
         "秋招全职",
@@ -87,6 +88,11 @@ _RECRUITMENT_KEYWORDS: frozenset[str] = frozenset(
         "秋招提前批",
         "暑假实习",
         "社招全职",
+        # 任务 11A.2：补招/补录类
+        "春招补招",
+        "秋招补招",
+        "春招补录",
+        "秋招补录",
         "秋招",
         "春招",
     }
@@ -206,12 +212,20 @@ def _is_cohort(value: object) -> bool:
     return False
 
 
-def _is_recruitment_keyword(value: object) -> bool:
-    """判断是否为招聘类型关键词（任务 11A 扩展）。
+# 组合招聘类型的分隔符（任务 11A.2）：/ , ， 、
+_RECRUITMENT_COMBO_SEPARATORS = re.compile(r"[/,，、]")
 
-    支持组合类型（如"秋招全职/日常实习"），先按 / 切分，
-    各部分都必须在 _RECRUITMENT_KEYWORDS 白名单中才视为招聘类型。
-    不得把任意非空文本都当作招聘类型。
+
+def _is_recruitment_keyword(value: object) -> bool:
+    """判断是否为招聘类型关键词（任务 11A/11A.2）。
+
+    规则：
+    - 原子类型必须命中 ``_RECRUITMENT_KEYWORDS`` 白名单（精确匹配）；
+    - 组合类型（如"日常实习/秋招全职"）按分隔符 / , ， 、 切分，
+      每部分去除首尾空格，全部非空部分都命中白名单才返回 True；
+    - 有分隔符但任一部分非法 → False；
+    - 日期、URL、学历、届次一律 False；
+    - 不得使用"包含招/补/实习"等宽泛子字符串判断。
     """
     if value is None:
         return False
@@ -224,11 +238,17 @@ def _is_recruitment_keyword(value: object) -> bool:
     # 单一关键词
     if text in _RECRUITMENT_KEYWORDS:
         return True
-    # 组合类型：按 / 切分，各部分都必须在白名单中
-    if "/" in text:
-        parts = [p.strip() for p in text.split("/")]
-        if len(parts) > 1 and all(p in _RECRUITMENT_KEYWORDS for p in parts):
+    # 组合类型：按分隔符切分，各部分都必须在白名单中
+    if _RECRUITMENT_COMBO_SEPARATORS.search(text):
+        parts = [
+            p.strip() for p in _RECRUITMENT_COMBO_SEPARATORS.split(text)
+        ]
+        non_empty = [p for p in parts if p]
+        if len(non_empty) > 1 and all(
+            p in _RECRUITMENT_KEYWORDS for p in non_empty
+        ):
             return True
+        return False
     return False
 
 
@@ -1218,6 +1238,81 @@ def get_detection_reason_display(reason: str | None) -> str:
     if not reason:
         return ""
     return DETECTION_REASON_DISPLAY.get(reason, reason)
+
+
+# unknown 原因的归类（任务 11A.2）：帮助用户判断剩余记录的性质。
+# 四类闭合：规则疑似漏识别 / 缺少必要字段 / 表头冲突 / 需人工确认。
+REASON_CATEGORY_DISPLAY: dict[str, str] = {
+    "rule_gap": "规则疑似漏识别",
+    "missing_fields": "缺少必要字段",
+    "header_conflict": "表头冲突",
+    "needs_review": "需人工确认",
+}
+
+# detection_reason → 归类 key
+_REASON_CATEGORY_MAP: dict[str, str] = {
+    "unrecognized_cohort": "rule_gap",
+    "unrecognized_recruitment_type": "rule_gap",
+    "unrecognized_location": "rule_gap",
+    "missing_required_source_fields": "missing_fields",
+    "missing_required_job_values": "missing_fields",
+    "missing_required_headers": "missing_fields",
+    "incomplete_layout_signature": "missing_fields",
+    "incomplete_header_signature": "missing_fields",
+    "ambiguous_source_headers": "header_conflict",
+    "conflicting_header_mapping": "header_conflict",
+}
+
+
+def get_reason_category(reason: str | None) -> str:
+    """获取 detection_reason 的归类 key（四类闭合，未知原因归 needs_review）。"""
+    if not reason:
+        return "needs_review"
+    return _REASON_CATEGORY_MAP.get(reason, "needs_review")
+
+
+def summarize_unknown_reasons(
+    records: "Sequence[Mapping] | None",
+) -> list[dict[str, Any]]:
+    """按 ``detection_reason`` 汇总全部 unknown 记录（任务 11A.2，纯函数）。
+
+    只输出原因代码、中文原因、归类和数量，**不携带**任何公司名称、
+    职位描述、链接或 raw_data，供页面折叠面板安全展示。
+
+    Args:
+        records: 解析记录列表（opportunity_importer / detect_row 的输出）。
+
+    Returns:
+        按 count 降序、reason 代码升序排列的列表，每项::
+
+            {
+                "detection_reason": str,   # 原因代码（无 reason 记为 "unspecified"）
+                "reason_display": str,     # 中文原因
+                "category": str,           # 归类 key（四类闭合）
+                "category_display": str,   # 归类中文
+                "count": int,              # 数量
+            }
+    """
+    counts: dict[str, int] = {}
+    for rec in records or []:
+        if not isinstance(rec, Mapping) or rec.get("record_type") != "unknown":
+            continue
+        reason = rec.get("detection_reason") or "unspecified"
+        counts[reason] = counts.get(reason, 0) + 1
+    return [
+        {
+            "detection_reason": reason,
+            "reason_display": get_detection_reason_display(reason),
+            "category": get_reason_category(reason),
+            "category_display": REASON_CATEGORY_DISPLAY[
+                get_reason_category(reason)
+            ],
+            "count": count,
+        }
+        for reason, count in sorted(
+            counts.items(), key=lambda kv: (-kv[1], kv[0])
+        )
+    ]
 
 
 def _has_mainland_job_signature(row: Mapping) -> bool:

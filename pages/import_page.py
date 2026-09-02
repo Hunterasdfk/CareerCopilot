@@ -41,7 +41,11 @@ import streamlit as st
 
 from database.db_handler import get_connection, get_preview_connection, init_db
 from services.dedup_service import preview_identifier
-from services.layout_detector import SUPPORTED_SHEETS, get_detection_reason_display
+from services.layout_detector import (
+    SUPPORTED_SHEETS,
+    get_detection_reason_display,
+    summarize_unknown_reasons,
+)
 from services.opportunity_importer import (
     list_workbook_sheets,
     parse_csv,
@@ -154,6 +158,24 @@ def _render_preview_rows(records: list[dict]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _build_unknown_reason_summary_df(records: list[dict]) -> pd.DataFrame:
+    """构建 unknown 原因汇总表（任务 11A.2）。
+
+    只包含原因代码、中文原因、归类与数量，不含公司名称、
+    职位描述、链接或 raw_data（summarize_unknown_reasons 保证）。
+    """
+    rows = [
+        {
+            "原因代码": item["detection_reason"],
+            "原因": item["reason_display"],
+            "归类": item["category_display"],
+            "数量": item["count"],
+        }
+        for item in summarize_unknown_reasons(records)
+    ]
+    return pd.DataFrame(rows, columns=["原因代码", "原因", "归类", "数量"])
+
+
 # ---------------------------------------------------------------------------
 # 1) 上传（保存到系统临时目录）
 # ---------------------------------------------------------------------------
@@ -257,6 +279,18 @@ else:
         f"共 {len(pending_records)} 条 unknown；已选择类型 {confirmed}；"
         f"未选择类型 {unconfirmed}。"
     )
+
+    # 任务 11A.2：unknown 原因汇总（只显示原因与数量，不含公司/描述/链接）
+    with st.expander("查看待确认原因汇总"):
+        st.dataframe(
+            _build_unknown_reason_summary_df(records),
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.caption(
+            "汇总仅统计原因与数量：规则疑似漏识别可反馈补充规则；"
+            "缺少必要字段或表头冲突需检查源数据；其余记录需人工判断。"
+        )
 
     # 页大小选择（默认 20，可选 20/50，上限 50）
     page_size = st.selectbox(
