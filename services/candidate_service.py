@@ -94,7 +94,7 @@ def _normalize_company(name: object) -> str:
     return str(name).strip()
 
 
-def _sort_key(opp: Mapping) -> tuple[int, int, int]:
+def _sort_key(opp: Mapping) -> tuple[int, int, int, object]:
     """单公司内机会排序键（确定性）。
 
     1. priority 权重（high=0 < medium=1 < low=2）；
@@ -103,10 +103,20 @@ def _sort_key(opp: Mapping) -> tuple[int, int, int]:
     """
     priority = str(opp.get("priority") or "low")
     record_type = str(opp.get("record_type") or "")
+    raw_id = opp.get("id")
+    try:
+        # SQLite uses integer IDs; Supabase uses UUIDs.  Keep numeric ordering
+        # for the former and deterministic lexical ordering for the latter.
+        id_group = 0
+        id_value: object = int(raw_id or 0)
+    except (TypeError, ValueError):
+        id_group = 1
+        id_value = str(raw_id or "")
     return (
         _PRIORITY_WEIGHT.get(priority, 99),
         _TYPE_WEIGHT.get(record_type, 99),
-        int(opp.get("id") or 0),
+        id_group,
+        id_value,
     )
 
 

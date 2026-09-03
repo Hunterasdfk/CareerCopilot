@@ -193,3 +193,21 @@
     *   `README.md` 内容清晰，能指导新用户完成从安装到使用的全过程。
     *   GitHub Actions 配置正确，PR 提交时能自动触发测试。
     *   确认项目中无任何真实源数据、个人隐私数据或违规代码。
+
+### 任务 12B：Supabase 登录、云端导入与申请记录
+
+*   **描述**：在任务 12A 的 Postgres 表与 RLS 基础上接入 Streamlit 云端模式。
+*   **输出**：
+    *   `components/auth_ui.py` / `services/supabase_service.py`：邮箱注册、登录、会话恢复、退出，以及最小化的用户资料同步；
+    *   `pages/import_page.py`：云端去重预览，用户明确点击“确认导入”后以服务端密钥写入合格机会与导入批次；
+    *   `pages/dashboard.py` / `pages/applications.py`：全局机会目录 + 当前账户申请状态、公司/岗位记录、自定义流程步骤、下一步行动和时间线；
+    *   Streamlit Secrets 配置示例与云端运行文档。
+*   **边界**：
+    *   未配置 Supabase 时继续使用本地 SQLite；
+    *   service-role/secret key 只允许出现在服务端 Secrets；
+    *   unknown、invalid、duplicate 不写入云端机会目录；
+    *   不自动检测招聘网站流程，不自动提交申请，流程步骤由用户手动维护。
+*   **完成标准**：
+    *   Supabase 认证会话可恢复，申请记录按 `auth.uid()` 隔离；
+    *   合格 Excel 记录和导入批次可持久化到云端，重复导入不会覆盖已有机会；
+    *   本地回归测试、页面无 Secrets 冒烟测试和 `pip check` 全部通过。

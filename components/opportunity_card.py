@@ -19,6 +19,17 @@ from typing import Any, Mapping
 import streamlit as st
 
 
+def _action_id(value: object) -> object:
+    """保留 Supabase UUID，同时兼容旧版 SQLite 整数 ID。"""
+
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, int):
+        return value
+    text = str(value or "").strip()
+    return int(text) if text.isdigit() else text
+
+
 def _record_type_badge(record_type: str) -> str:
     """返回 record_type 的视觉标签文本。"""
     if record_type == "job":
@@ -103,13 +114,20 @@ def render_opportunity_card(
                 if col1.button(
                     "打开投递链接", key=f"open_link_{opp_id}"
                 ):
-                    action = {"type": "open_link", "opp_id": int(opp_id)}
+                    action = {
+                        "type": "open_link",
+                        "opp_id": _action_id(opp_id),
+                        "application_id": opp.get("application_id"),
+                        "opportunity": dict(opp),
+                    }
                 if col2.button(
                     "确认已投递", key=f"confirm_applied_{opp_id}"
                 ):
                     action = {
                         "type": "confirm_applied",
-                        "opp_id": int(opp_id),
+                        "opp_id": _action_id(opp_id),
+                        "application_id": opp.get("application_id"),
+                        "opportunity": dict(opp),
                     }
                 return action
     return None

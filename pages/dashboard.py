@@ -29,10 +29,11 @@
 from __future__ import annotations
 
 import webbrowser
-from typing import Any
+from typing import Any, Mapping
 
 import streamlit as st
 
+from components.auth_ui import AuthContext, render_auth_controls
 from components.filters import render_filter_summary, render_filters
 from components.opportunity_card import render_opportunity_card
 from config.settings import DB_PATH
@@ -47,6 +48,10 @@ from services.opportunity_service import (
     get_filter_options,
     mark_as_opened,
     paginate_list,
+)
+from services.supabase_service import (
+    SupabaseDataError,
+    SupabaseDataService,
 )
 
 st.set_page_config(page_title="机会看板", page_icon="📋", layout="wide")
@@ -98,6 +103,168 @@ def _handle_action(action: dict[str, Any]) -> None:
 
     # 刷新看板数据
     st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# 任务 12B：云端机会看板与按用户申请状态覆盖
+# ---------------------------------------------------------------------------
+
+
+def _ensure_cloud_application(
+    service: SupabaseDataService, action: Mapping[str, Any]
+) -> str:
+    """首次操作云端机会时自动建立当前用户的申请记录。"""
+
+    existing = action.get("application_id")
+    if existing:
+        return str(existing)
+    opportunity = action.get("opportunity") or {}
+    title = opportunity.get("job_title") or opportunity.get("display_title")
+    application = service.create_application(
+        company_name=str(opportunity.get("company_name") or "未填写公司"),
+        job_title=str(title or "未填写岗位"),
+        opportunity_id=(
+            str(opportunity["id"]) if opportunity.get("id") is not None else None
+        ),
+        application_url=(
+            opportunity.get("application_url") or opportunity.get("announcement_url")
+        ),
+    )
+    if not application.get("id"):
+        raise SupabaseDataError("云端申请记录创建后未返回 ID。")
+    return str(application["id"])
+
+
+def _handle_cloud_action(
+    action: dict[str, Any], service: SupabaseDataService
+) -> None:
+    """执行云端申请状态动作；状态写入受 Supabase RLS 保护。"""
+
+    try:
+        application_id = _ensure_cloud_application(service, action)
+        if action["type"] == "open_link":
+            result = service.mark_application_opened(application_id)
+            if result.get("should_open") and result.get("url"):
+                webbrowser.open(str(result["url"]))
+                st.toast("已标记为 opened")
+            elif result.get("action") == "no_link":
+                st.warning("无可用 http/https 链接，未更新状态。")
+            else:
+                st.info(str(result.get("message") or "申请状态未改变。"))
+        elif action["type"] == "confirm_applied":
+            result = service.confirm_application_applied(application_id)
+            if result.get("action") == "applied":
+                st.toast("已确认投递")
+            else:
+                st.info("申请状态未改变（可能已经是更高阶段）。")
+    except SupabaseDataError as exc:
+        st.error(f"云端状态更新失败：{exc}")
+    st.rerun()
+
+
+def _render_cloud_dashboard(context: AuthContext) -> None:
+    """渲染使用 Supabase 的看板；全局机会只读，状态属于当前用户。"""
+
+    service = SupabaseDataService(context.client)
+    try:
+        catalogue = service.list_opportunities()
+        applications = service.list_applications()
+    except SupabaseDataError as exc:
+        st.error(f"云端数据读取失败：{exc}")
+        return
+
+    from services.supabase_service import overlay_user_applications
+
+    all_opps = overlay_user_applications(catalogue, applications)
+    st.caption("当前使用 Supabase 云端目录；投递状态和申请记录仅属于当前登录账户。")
+    options = get_filter_options(all_opps)
+    filters = render_filters(options)
+    page_size = st.sidebar.selectbox(
+        "每页显示条数", [20, 50, 100], index=0, key="cloud_dash_page_size"
+    )
+    filtered = filter_opportunities(
+        all_opps,
+        company_name=filters["company_name"],
+        location=filters["location"],
+        record_type=filters["record_type"],
+        status=filters["status"],
+    )
+    view_mode = st.radio(
+        "视图", ["全量视图", "候选清单视图"], horizontal=True, key="cloud_dash_view"
+    )
+    if view_mode == "全量视图":
+        page_info = paginate_list(
+            len(filtered), page_size, st.session_state.get("cloud_dash_page", 1)
+        )
+        st.session_state["cloud_dash_page"] = page_info["current_page"]
+        render_filter_summary(len(all_opps), len(filtered), page_info)
+        if filtered:
+            pages = list(range(1, page_info["total_pages"] + 1))
+            selected = st.selectbox(
+                "页码", pages, index=page_info["current_page"] - 1, key="cloud_dash_page_select"
+            )
+            page_info = paginate_list(len(filtered), page_size, selected)
+            st.session_state["cloud_dash_page"] = selected
+            for opportunity in filtered[page_info["start"] : page_info["end"]]:
+                action = render_opportunity_card(opportunity, interactive=True)
+                if action:
+                    _handle_cloud_action(action, service)
+                    break
+        return
+
+    coverage = build_company_coverage(filtered)
+    st.caption(
+        f"筛选前总数：{len(all_opps)}  | 筛选后总数：{len(filtered)}  | "
+        f"公司数：{len(coverage)}"
+    )
+    if not coverage:
+        st.info("没有符合筛选条件的公司。")
+        return
+    company_names = [item["company_name"] for item in coverage]
+    selected_name = st.selectbox(
+        "选择公司查看详情", company_names, key="cloud_dash_company"
+    )
+    selected_company = next(item for item in coverage if item["company_name"] == selected_name)
+    with st.container(border=True):
+        st.subheader(selected_company["company_name"])
+        if selected_company["coverage_gap"]:
+            st.warning(f"还需补充 {selected_company['coverage_gap']} 个机会")
+        if selected_company["campaign_only"]:
+            st.warning(selected_company["campaign_only_message"])
+        st.caption(
+            f"总机会：{selected_company['total_count']}  | "
+            f"重点展示：{len(selected_company['highlighted_top_three'])} 条"
+        )
+    company_opps = selected_company["opportunities"]
+    page_info = paginate_list(
+        len(company_opps), page_size, st.session_state.get("cloud_company_page", 1)
+    )
+    pages = list(range(1, page_info["total_pages"] + 1))
+    selected_page = st.selectbox(
+        "机会页码", pages, index=page_info["current_page"] - 1, key="cloud_company_page_select"
+    )
+    page_info = paginate_list(len(company_opps), page_size, selected_page)
+    top_ids = {str(item.get("id")) for item in selected_company["highlighted_top_three"]}
+    for opportunity in company_opps[page_info["start"] : page_info["end"]]:
+        action = render_opportunity_card(
+            opportunity,
+            highlight=str(opportunity.get("id")) in top_ids,
+            interactive=True,
+        )
+        if action:
+            _handle_cloud_action(action, service)
+            break
+
+
+# Supabase 配置存在时要求登录，并完全使用云端数据；没有配置时继续走
+# 原有的本地 SQLite 看板，方便离线开发与兼容旧测试。
+auth_context = render_auth_controls()
+if auth_context is not None:
+    if auth_context.user is None:
+        st.info("请先在左侧登录 Supabase 账户，再查看云端机会。")
+        st.stop()
+    _render_cloud_dashboard(auth_context)
+    st.stop()
 
 
 # ---------------------------------------------------------------------------

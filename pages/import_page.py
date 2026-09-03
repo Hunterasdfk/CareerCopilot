@@ -39,6 +39,7 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
+from components.auth_ui import render_auth_controls
 from database.db_handler import get_connection, get_preview_connection, init_db
 from services.dedup_service import preview_identifier
 from services.layout_detector import (
@@ -65,6 +66,12 @@ from services.opportunity_service import (
     import_opportunities,
     paginate_unknown,
 )
+from services.supabase_service import (
+    SupabaseDataError,
+    SupabaseDataService,
+    SupabaseConfigurationError,
+    create_supabase_client,
+)
 
 st.set_page_config(page_title="机会导入", page_icon="📥", layout="wide")
 st.title("机会导入")
@@ -72,6 +79,13 @@ st.caption(
     "上传 XLSX/CSV 求职机会表 → 选择工作表 → 预览与人工确认 → "
     "点击“确认导入”写库。预览与刷新阶段不会写库。"
 )
+
+# Supabase 配置存在时切换到云端账户模式；未配置时保持本地 SQLite 兼容模式。
+auth_context = render_auth_controls()
+cloud_mode = auth_context is not None
+if cloud_mode and auth_context.user is None:
+    st.info("请先在左侧登录 Supabase 账户，再进行云端导入。")
+    st.stop()
 
 # ---------------------------------------------------------------------------
 # 上传临时文件管理（只进系统临时目录，不进仓库）
@@ -390,10 +404,35 @@ else:
 # 收集全部确认（当前页以外也保留在 store 中）
 confirmations = collect_confirmations(store, pending_records)
 
-# 预览阶段：只读连接或内存库，不创建持久数据库
-preview_conn = get_preview_connection()
+# 预览阶段：只读连接或内存库，不创建持久数据库。
+# 云端模式只把已存在的 dedupe_key 放入临时 SQLite，classify_records 仍然
+# 复用经过测试的四类统计逻辑；不会把云端业务数据写入本地文件。
+preview_conn = get_preview_connection(":memory:" if cloud_mode else None)
 
 try:
+    if cloud_mode:
+        cloud_reader = SupabaseDataService(auth_context.client)
+        try:
+            dedupe_keys = sorted(cloud_reader.list_dedupe_keys())
+        except SupabaseDataError as exc:
+            st.error(f"云端去重数据读取失败：{exc}")
+            st.stop()
+        for index, dedupe_key in enumerate(dedupe_keys, start=1):
+            preview_conn.execute(
+                "INSERT OR IGNORE INTO opportunities "
+                "(record_type, display_title, company_name, source_sheet, source_row, "
+                "dedupe_key, raw_data) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "job",
+                    "云端去重缓存",
+                    "云端目录",
+                    "cloud",
+                    index + 1,
+                    dedupe_key,
+                    "{}",
+                ),
+            )
+        preview_conn.commit()
     st.subheader("导入前统计")
     classification = classify_records(records, preview_conn, confirmations)
     counts = classification["counts"]
@@ -434,43 +473,76 @@ try:
         "重复、无效与待人工确认记录一律不入库。"
     )
     if st.button("确认导入", type="primary"):
-        # 正式导入阶段：打开独立可写连接 + init_db（此时才允许创建/修改数据库）
-        write_conn = get_connection()
-        try:
-            init_db(write_conn)
-            report = import_opportunities(records, write_conn, confirmations)
-        except Exception as exc:  # 事务已回滚（服务层负责），这里只展示
-            st.error(f"导入失败，事务已回滚，未写入任何数据：{exc}")
-        else:
-            st.success(
-                f"导入完成：实际新增 {report['inserted']} 条；"
-                f"重复 {report['counts'][CATEGORY_DUPLICATE]} 条；"
-                f"无效 {report['counts'][CATEGORY_INVALID]} 条；"
-                f"待人工确认 {report['counts'][CATEGORY_PENDING]} 条。"
-            )
-            st.caption(
-                f"导入批次 ID：{report['batch_id']}"
-                f"（实际分类合计 {sum(report['counts'].values())}"
-                f"/{report['total']} 条）"
-            )
-            with st.expander("导入报告明细（实际写入结果）"):
-                tab_new2, tab_dup2, tab_inv2, tab_pen2 = st.tabs(
-                    ["新增", "重复", "无效", "待人工确认"]
+        if cloud_mode:
+            # 云端模式：用户 JWT 只负责读取，管理员服务端客户端负责写入
+            # 全局 opportunities/import_batches。service-role key 只能来自
+            # Streamlit Secrets，绝不进入页面或浏览器。
+            try:
+                admin_client = create_supabase_client(
+                    auth_context.config, service_role=True
                 )
-                for tab, category in (
-                    (tab_new2, CATEGORY_NEW),
-                    (tab_dup2, CATEGORY_DUPLICATE),
-                    (tab_inv2, CATEGORY_INVALID),
-                    (tab_pen2, CATEGORY_PENDING),
-                ):
-                    with tab:
-                        for item in report["items"][category]:
-                            rec = item["record"]
-                            st.write(
-                                f"- 第 {rec.get('source_row')} 行："
-                                f"{item['reason']}"
-                            )
-        finally:
-            write_conn.close()
+                cloud_writer = SupabaseDataService(
+                    auth_context.client, admin_client=admin_client
+                )
+                report = cloud_writer.import_records_as_admin(
+                    records,
+                    classification,
+                    source_filename=uploaded.name,
+                    created_by=auth_context.user.id,
+                    file_bytes=uploaded.getvalue(),
+                )
+            except (SupabaseConfigurationError, SupabaseDataError) as exc:
+                st.error(f"云端导入失败：{exc}")
+            else:
+                st.success(
+                    f"已写入 Supabase 云端：新增 {report['inserted']} 条；"
+                    f"重复 {report['counts'][CATEGORY_DUPLICATE]} 条；"
+                    f"无效 {report['counts'][CATEGORY_INVALID]} 条；"
+                    f"待人工确认 {report['counts'][CATEGORY_PENDING]} 条。"
+                )
+                st.caption(
+                    f"云端导入批次 ID：{report['batch_id']}"
+                    f"（分类合计 {sum(report['counts'].values())}"
+                    f"/{report['total']} 条）"
+                )
+        else:
+            # 本地模式：正式导入阶段才打开可写 SQLite 连接。
+            write_conn = get_connection()
+            try:
+                init_db(write_conn)
+                report = import_opportunities(records, write_conn, confirmations)
+            except Exception as exc:  # 事务已回滚（服务层负责），这里只展示
+                st.error(f"导入失败，事务已回滚，未写入任何数据：{exc}")
+            else:
+                st.success(
+                    f"导入完成：实际新增 {report['inserted']} 条；"
+                    f"重复 {report['counts'][CATEGORY_DUPLICATE]} 条；"
+                    f"无效 {report['counts'][CATEGORY_INVALID]} 条；"
+                    f"待人工确认 {report['counts'][CATEGORY_PENDING]} 条。"
+                )
+                st.caption(
+                    f"导入批次 ID：{report['batch_id']}"
+                    f"（实际分类合计 {sum(report['counts'].values())}"
+                    f"/{report['total']} 条）"
+                )
+                with st.expander("导入报告明细（实际写入结果）"):
+                    tab_new2, tab_dup2, tab_inv2, tab_pen2 = st.tabs(
+                        ["新增", "重复", "无效", "待人工确认"]
+                    )
+                    for tab, category in (
+                        (tab_new2, CATEGORY_NEW),
+                        (tab_dup2, CATEGORY_DUPLICATE),
+                        (tab_inv2, CATEGORY_INVALID),
+                        (tab_pen2, CATEGORY_PENDING),
+                    ):
+                        with tab:
+                            for item in report["items"][category]:
+                                rec = item["record"]
+                                st.write(
+                                    f"- 第 {rec.get('source_row')} 行："
+                                    f"{item['reason']}"
+                                )
+            finally:
+                write_conn.close()
 finally:
     preview_conn.close()

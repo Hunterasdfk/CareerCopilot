@@ -2,6 +2,7 @@
 
 > 面向中国大学生秋招 / 春招场景的开源求职机会管理助手。
 > MVP 0.1：岗位导入 → 布局识别 → 去重入库 → 看板浏览 → 公司覆盖检查 → 投递状态追踪。
+> 任务 12B：可选 Supabase 登录、云端机会目录与按用户隔离的申请记录。
 
 ## 目录
 
@@ -28,6 +29,7 @@ CareerCopilot 是一个本地运行的求职机会管理工具，帮助应届毕
 - **项目入口与具体岗位混淆**：数据中既有校招项目 / 统一入口（campaign），也有具体岗位（job）。CareerCopilot 在界面上明确区分二者：campaign 需进入官网选择具体岗位，job 可直接投递。
 - **状态管理混乱**：严格区分“打开链接”（opened）与“确认已投递”（applied），避免误判投递进度。
 - **公司覆盖度不明确**：按公司返回全部机会并默认突出前 3 个（不截断、不设上限），机会少于 3 个时显示数量缺口。
+- **申请记录易丢失**：登录 Supabase 后，申请公司/岗位、统一状态、自定义流程步骤、下一步行动和时间线保存到云端。
 
 ## 核心功能
 
@@ -41,6 +43,7 @@ CareerCopilot 是一个本地运行的求职机会管理工具，帮助应届毕
 | 公司覆盖检查 | 按公司返回全部已排序机会，默认突出前 3 个（不截断）；不足 3 个显示缺口；只有 campaign 的公司提示“需进入官网选择具体岗位”。 |
 | 状态追踪 | 完整状态流转（discovered → shortlisted → opened → applying → applied → assessment → interview → offer → rejected → withdrawn）。 |
 | 持久化 | 本地 SQLite 数据库存储，应用重启后所有状态与优先级变更依然保留。 |
+| 云端申请记录 | Supabase Auth + RLS；每个账户只读取/修改自己的申请记录和时间线。 |
 
 ## 技术栈
 
@@ -48,7 +51,7 @@ CareerCopilot 是一个本地运行的求职机会管理工具，帮助应届毕
 | :--- | :--- |
 | 核心语言 | Python 3.11 |
 | 前端框架 | Streamlit (≥ 1.28) |
-| 数据库 | SQLite（Python 标准库 `sqlite3`，不引入 ORM） |
+| 数据库 | 本地 SQLite（离线兼容）+ Supabase Postgres（登录后的云端模式） |
 | 数据处理 | pandas, openpyxl |
 | 测试框架 | pytest |
 
@@ -70,10 +73,12 @@ CareerCopilot/
 │   ├── layout_detector.py      # 按工作表选择解析策略
 │   ├── dedup_service.py        # 按 record_type 差异化去重
 │   ├── opportunity_service.py  # 增删改查与状态流转
-│   └── candidate_service.py    # 公司覆盖检查
+│   ├── candidate_service.py    # 公司覆盖检查
+│   └── supabase_service.py     # Supabase Auth、云端机会与申请记录
 ├── pages/
 │   ├── import_page.py          # 机会导入页面
-│   └── dashboard.py            # 机会看板页面
+│   ├── dashboard.py            # 机会看板页面
+│   └── applications.py         # 按用户隔离的申请记录与时间线
 ├── components/
 │   ├── opportunity_card.py     # 机会卡片组件
 │   └── filters.py              # 筛选器组件
@@ -127,13 +132,20 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-### 5. 运行测试
+### 5. 启用云端账户（可选，任务 12B）
+
+复制 `.streamlit/secrets.toml.example` 为 `.streamlit/secrets.toml`，填写
+Supabase 项目的 URL 和 publishable key；如需从页面确认云端 Excel 导入，再
+填写仅保存在服务器端的 service-role/secret key。该文件已被 Git 忽略，禁止
+提交真实密钥。未配置时应用继续使用本地 SQLite 模式。
+
+### 6. 运行测试
 
 ```bash
 python -m pytest
 ```
 
-### 6. 启动 Streamlit 应用
+### 7. 启动 Streamlit 应用
 
 ```bash
 streamlit run app.py
@@ -147,6 +159,7 @@ streamlit run app.py
 2. **导入机会表**：上传 XLSX / CSV → 选择工作表 → 查看布局识别结果 → 对 unknown 记录人工确认记录类型与字段映射 → 查看导入报告（新增 / 重复 / 无效 / 待确认）→ 确认导入。
 3. **浏览与覆盖检查**：全量视图查看所有机会；候选清单视图查看每家公司全部已排序机会（前 3 个默认突出，不截断；不足 3 个显示缺口；只有 campaign 的公司提示“需进入官网选择具体岗位”）。
 4. **投递与状态管理**：点击“投递”按钮 → 浏览器跳转链接，状态变为 `opened`；投递完成后**手动点击“确认已投递”**，状态才变为 `applied`；根据进展手动更新后续状态。
+5. **申请记录（云端模式）**：登录 Supabase 后，在“申请记录”页面按公司查看岗位，手动填写每家公司独有的流程步骤、下一步行动和时间线；这些记录按账户隔离，下一次登录仍可读取。
 
 > **重要**：只能导入用户有权使用的 XLSX / CSV 文件。CareerCopilot 不绕过验证码、不实现反检测、不自动捏造求职信息、不默认点击最终提交、不默认自动发送邮件。
 

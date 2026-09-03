@@ -9,3 +9,7 @@ streamlit>=1.28.0
 pandas>=2.0.0
 openpyxl>=3.1.0
 pytest>=7.4.0
+
+# Cloud authentication and database access for task 12B.  Keep this pinned so
+# local runs and Streamlit deployments use the same Supabase client surface.
+supabase==2.31.0
