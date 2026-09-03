@@ -80,14 +80,18 @@ _RECRUITMENT_KEYWORDS: frozenset[str] = frozenset(
     {
         "秋招全职",
         "春招全职",
+        "校招全职",
         "日常实习",
         "暑期实习",
+        "寒假实习",
         "秋招实习",
         "春招实习",
+        "实习",
         "实习生招聘",
         "秋招提前批",
         "暑假实习",
         "社招全职",
+        "社招",
         # 任务 11A.2：补招/补录类
         "春招补招",
         "秋招补招",
@@ -95,6 +99,11 @@ _RECRUITMENT_KEYWORDS: frozenset[str] = frozenset(
         "秋招补录",
         "秋招",
         "春招",
+        # 任务 11A.3：补录全职/专场等
+        "春招补录全职",
+        "秋招全职补录",
+        "秋招全职补招",
+        "春招专场",
     }
 )
 
@@ -106,9 +115,20 @@ _COHORT_SEPARATORS_PATTERN = re.compile(r"[/\-，,、]")
 
 # 单个届次部分：4 位年份 + 可选"届"（如 2026、2026届）
 _COHORT_PART_PATTERN = re.compile(r"^\d{4}\s*届?$")
+
+# 届次特殊值（任务 11A.3）：不限届、无限制等无年份表达
+_COHORT_SPECIAL_VALUES: frozenset[str] = frozenset({"不限届", "无限制"})
+
+# 占位值（任务 11A.3）：字段值为这些时视为"未提供"，不阻塞分类
+_PLACEHOLDER_VALUES: frozenset[str] = frozenset(
+    {"暂无说明", "未说明", "不限", "空值", "无"}
+)
 # 学历关键词（§3.5）
 _EDUCATION_KEYWORDS: frozenset[str] = frozenset(
-    {"大专", "本科", "硕士", "博士", "学历不限", "本科及以上", "硕士及以上"}
+    {
+        "大专", "专科", "本科", "硕士", "博士", "学历不限",
+        "本科及以上", "硕士及以上", "博士及以上", "专科及以上", "大专及以上",
+    }
 )
 
 # 明确岗位名称特征关键词（修复点 1，新增 _is_job_title_like）
@@ -141,6 +161,53 @@ _KNOWN_REGIONS: frozenset[str] = frozenset(
         "郑州", "南昌", "太原", "南宁", "海口", "贵阳", "昆明", "兰州",
         "沈阳", "长春", "哈尔滨", "石家庄", "呼和浩特", "银川", "西宁",
         "乌鲁木齐", "拉萨",
+        # 其他地级市（任务 11A.3 补充）
+        "珠海", "佛山", "东莞", "无锡", "常州", "温州", "烟台", "威海",
+        "中山", "惠州", "南通", "扬州", "徐州", "嘉兴", "绍兴", "金华",
+        "台州", "泉州", "晋江", "漳州", "淄博", "潍坊", "临沂", "济宁",
+        "洛阳", "宜昌", "襄阳", "株洲", "湘潭", "佛山", "海口", "三亚",
+        "桂林", "柳州", "绵阳", "德阳", "泸州", "南充", "遵义", "曲靖",
+        "宝鸡", "咸阳", "延安", "榆林", "天水", "酒泉", "赣州", "九江",
+        "吉安", "上饶", "宜春", "菏泽", "聊城", "德州", "滨州", "东营",
+        "泰安", "日照", "莱芜", "邯郸", "保定", "沧州", "廊坊", "衡水",
+        "承德", "张家口", "邢台", "包头", "赤峰", "通辽", "鄂尔多斯",
+        "鞍山", "抚顺", "本溪", "丹东", "锦州", "营口", "盘锦", "阜新",
+        "辽阳", "朝阳", "葫芦岛", "吉林", "四平", "通化", "白山", "松原",
+        "白城", "大庆", "齐齐哈尔", "佳木斯", "牡丹江", "鸡西", "鹤岗",
+        "双鸭山", "盐城", "镇江", "泰州", "宿迁", "淮安", "连云港",
+        "宿州", "亳州", "六安", "宣城", "池州", "安庆", "黄山", "滁州",
+        "蚌埠", "淮南", "淮北", "马鞍山", "铜陵", "芜湖", "阜阳",
+        "莆田", "三明", "南平", "龙岩", "宁德",
+        "景德镇", "萍乡", "新余", "鹰潭", "赣州",
+        "新乡", "焦作", "南阳", "信阳", "周口", "驻马店", "商丘",
+        "开封", "平顶山", "安阳", "鹤壁", "濮阳", "许昌", "漯河",
+        "三门峡", "济源",
+        "黄石", "十堰", "荆州", "荆门", "鄂州", "孝感", "黄冈", "咸宁",
+        "随州", "恩施",
+        "衡阳", "株洲", "岳阳", "常德", "张家界", "益阳", "郴州",
+        "永州", "怀化", "娄底",
+        "汕头", "韶关", "湛江", "茂名", "肇庆", "江门", "梅州", "汕尾",
+        "河源", "清远", "潮州", "揭阳", "云浮",
+        "北海", "防城港", "钦州", "贵港", "玉林", "百色", "贺州", "河池",
+        "来宾", "崇左",
+        "宜宾", "自贡", "攀枝花", "泸州", "德阳", "绵阳", "广元", "遂宁",
+        "内江", "乐山", "南充", "眉山", "广安", "达州", "雅安", "巴中",
+        "资阳",
+        "六盘水", "遵义", "安顺", "毕节", "铜仁",
+        "玉溪", "保山", "昭通", "丽江", "普洱", "临沧",
+        "楚雄", "红河", "文山", "西双版纳", "大理", "德宏", "怒江", "迪庆",
+        "日喀则", "昌都", "林芝", "山南", "那曲",
+        "延安", "汉中", "渭南", "安康", "商洛", "铜川",
+        "嘉峪关", "金昌", "白银", "天水", "武威", "张掖", "平凉", "酒泉",
+        "庆阳", "定西", "陇南",
+        "海东", "海西",
+        "银川", "石嘴山", "吴忠", "固原", "中卫",
+        "克拉玛依", "吐鲁番", "哈密", "昌吉", "博尔塔拉", "巴音郭楞",
+        "阿克苏", "克孜勒苏", "喀什", "和田", "伊犁", "塔城", "阿勒泰",
+        "石狮", "晋江", "南安", "龙海", "建瓯", "福清", "长乐",
+        "丹东", "东港", "凤城", "凌海", "北镇", "盖州", "大石桥", "海城",
+        "瓦房店", "普兰店", "庄河", "东港",
+        "舟山", "义乌", "慈溪", "余姚", "临海", "温岭", "瑞安", "乐清",
         # 特别行政区
         "香港", "澳门",
         # 海外常见
@@ -155,6 +222,7 @@ _SPECIAL_REGIONS: frozenset[str] = frozenset(
         "全国多地",
         "多地",
         "海外",
+        "全球",
         "远程",
     }
 )
@@ -171,9 +239,14 @@ _REGION_SUFFIXES: tuple[str, ...] = (
 # 多地分隔符（按这些切分后每段都须可识别）
 _LOCATION_SEPARATORS_PATTERN = re.compile(r"[/\-、,，;；\s]+")
 
+# 非地点短文本排除（任务 11A.3）：这些值不是地点，通过排除策略后仍需拒绝
+_NON_LOCATION_SHORT_VALUES: frozenset[str] = frozenset({
+    "可议", "面议", "详谈", "详见", "待定", "未知",
+})
+
 
 def _is_cohort(value: object) -> bool:
-    """判断是否为届次取值（任务 11A 扩展）。
+    """判断是否为届次取值（任务 11A/11A.3 扩展）。
 
     支持格式：
     - 单届次：2027届、2026 届
@@ -184,6 +257,10 @@ def _is_cohort(value: object) -> bool:
       - 2026届,2027届
       - 2026届、2027届
       - 2026-2027届
+    - 特殊值：不限届、无限制（任务 11A.3）
+    - 混合组合：2026/不限届、2025/2026/不限届（任务 11A.3）
+    - 届届容错：2027/2028届届、2026/2027届届（任务 11A.3）
+    - 尾部逗号/空格：2026届, → 2026届（任务 11A.3）
 
     必须继续拒绝日期、URL 和普通描述。
     """
@@ -195,25 +272,35 @@ def _is_cohort(value: object) -> bool:
     # 先拒绝日期和 URL
     if _is_date(text) or _is_url(text):
         return False
+    # 尾部逗号/空格容错（任务 11A.3）
+    text = text.rstrip("，, ")
+    # 单届次特殊值
+    if text in _COHORT_SPECIAL_VALUES:
+        return True
+    # 届届容错：规范化重复的"届届"为"届"（不修改源数据）
+    while "届届" in text:
+        text = text.replace("届届", "届")
     # 单届次
     if _COHORT_PATTERN.match(text):
         return True
-    # 多届次：按分隔符切分，每个部分都必须是 4 位年份（+可选"届"），
-    # 且整体必须包含至少一个"届"字
+    # 多届次：按分隔符切分
     parts = _COHORT_SEPARATORS_PATTERN.split(text)
-    if len(parts) > 1:
-        if "届" not in text:
+    non_empty = [p.strip() for p in parts if p.strip()]
+    if len(non_empty) > 1:
+        # 至少一个部分含"届"或为特殊值（区分纯年份范围）
+        if not any("届" in p or p in _COHORT_SPECIAL_VALUES for p in non_empty):
             return False
-        for part in parts:
-            part = part.strip()
-            if not part or not _COHORT_PART_PATTERN.match(part):
+        for part in non_empty:
+            if part in _COHORT_SPECIAL_VALUES:
+                continue
+            if not _COHORT_PART_PATTERN.match(part):
                 return False
         return True
     return False
 
 
-# 组合招聘类型的分隔符（任务 11A.2）：/ , ， 、
-_RECRUITMENT_COMBO_SEPARATORS = re.compile(r"[/,，、]")
+# 组合招聘类型的分隔符（任务 11A.2/11A.3）：/ , ， 、 ; ；
+_RECRUITMENT_COMBO_SEPARATORS = re.compile(r"[/,，、;；]")
 
 
 def _is_recruitment_keyword(value: object) -> bool:
@@ -256,6 +343,17 @@ def _is_education(value: object) -> bool:
     if value is None:
         return False
     return str(value).strip() in _EDUCATION_KEYWORDS
+
+
+def _is_placeholder(value: object) -> bool:
+    """判断是否为占位值（任务 11A.3）。
+
+    "暂无说明"、"未说明"、"不限"、"空值"、"无" 等视为字段未提供，
+    不阻塞表头可靠性判断，对应标准字段置空。
+    """
+    if value is None:
+        return False
+    return str(value).strip() in _PLACEHOLDER_VALUES
 
 
 def _is_job_title_like(value: object) -> bool:
@@ -309,38 +407,67 @@ def _is_date(value: object) -> bool:
 def _is_single_region(text: str) -> bool:
     """判断单个非空字符串是否为可识别地区。
 
-    规则（任务 11A 扩展）：
-    - 特殊地区表达（全国/全国多地/多地/海外/远程）直接识别；
-    - 知名地区词直接识别；
+    规则（任务 11A/11A.3）：
+    - 特殊地区表达（全国/全国多地/多地/海外/全球/远程）直接识别；
+    - 知名地区词直接识别（白名单）；
     - 以合理地区后缀结尾视为可识别；
-    - 其余（含 URL、日期、届次、学历、普通描述）一律拒绝。
+    - 文本包含已知地区词为子串时视为可识别（支持"上海北京深圳"等
+      无显式分隔符的城市串，任务 11A.3）；
+    - 其余一律拒绝（不使用宽松受控排除，避免"招聘若干"等误判为地点）。
+
+    注意：宽松的受控排除策略仅用于表头驱动的 ``_is_valid_location_value()``，
+    固定列回退路径使用此函数保持严格。
     """
     if not text:
         return False
-    # 先拒绝 URL/日期/届次/学历（即使含地区后缀也不许混入）
-    if _is_url(text) or _is_date(text) or _is_cohort(text) or _is_education(text):
+    # 受控排除：拒绝非地点值
+    if _is_url(text) or _is_date(text):
         return False
+    if _is_cohort(text) or _is_education(text):
+        return False
+    if _is_recruitment_keyword(text):
+        return False
+    if _is_placeholder(text):
+        return False
+    if text in _NON_LOCATION_SHORT_VALUES:
+        return False
+    # 拒绝含描述关键词的文本（如"普通描述"不是地点）
+    if "描述" in text or "正文" in text:
+        return False
+    if any(text.startswith(prefix) for prefix in _DESCRIPTION_PREFIXES):
+        return False
+    if _is_attachment_reference(text):
+        return False
+    # 已知/特殊地区
     if text in _SPECIAL_REGIONS:
         return True
     if text in _KNOWN_REGIONS:
         return True
     if any(text.endswith(suffix) for suffix in _REGION_SUFFIXES):
         return True
+    # 包含已知地区词为子串 → 视为可识别（支持无分隔符城市串，任务 11A.3）
+    if any(region in text for region in _KNOWN_REGIONS):
+        return True
+    # 其余一律拒绝（固定列路径不使用宽松受控排除）
     return False
 
 
 def is_city(value: object) -> bool:
     """判断取值是否为城市/地区。
 
-    规则（修复点 2，严格）：
+    规则（修复点 2/任务 11A.3 扩展）：
+    - 先对整体做 URL/日期预检查（避免分隔符切分后各段通过排除）；
     - 多地值按 / - 、 , 等切分后，**每个非空部分**都必须是可识别地区；
-    - 明确拒绝 URL、日期、届次、学历、普通描述（如"可议"）；
-    - 宁可标 unknown，也不得误判 job。
+    - 明确拒绝 URL、日期、届次、学历、普通描述（如"可议/面议"）；
+    - 受控排除：通过排除后的非空文本视为有效地点（任务 11A.3）。
     """
     if value is None:
         return False
     text = str(value).strip()
     if not text:
+        return False
+    # 预检查：整体是 URL 或日期时直接拒绝（任务 11A.3，避免切分后误通过）
+    if _is_url(text) or _is_date(text):
         return False
     # 单段直接判定
     if not _LOCATION_SEPARATORS_PATTERN.search(text):
@@ -631,14 +758,36 @@ def resolve_header_mapping(headers: Mapping[object, object] | None) -> HeaderMap
     )
 
 
+# 附件引用模式（任务 11A.3）：job_title 列值含这些时不是职位名称，应判 campaign
+_ATTACHMENT_REFERENCE_PATTERNS: tuple[str, ...] = (
+    "详见附件",
+    "岗位信息详见",
+    "招聘岗位详见",
+    "具体岗位详见",
+    "职位信息详见",
+    "详见招聘",
+)
+
+
+def _is_attachment_reference(value: object) -> bool:
+    """判断值是否为附件引用而非真实岗位名称（任务 11A.3）。"""
+    if value is None:
+        return False
+    text = str(value).strip()
+    return any(pattern in text for pattern in _ATTACHMENT_REFERENCE_PATTERNS)
+
+
 def _is_valid_job_title_value(value: object) -> bool:
-    """判断 job_title 列的取值是否为有效职位名称（任务 11A.1）。
+    """判断 job_title 列的取值是否为有效职位名称（任务 11A.1/11A.3）。
 
     与 _is_job_title_like 的区别：**不要求**包含"工程师/开发"等岗位关键词，
     只排除明显不是职位的取值：
     - 招聘类型关键词（如"秋招全职"——旧模板把招聘类型放在职位名称列）；
     - 届次、学历、URL、日期；
-    - 描述性前缀（如"负责…"）。
+    - 描述性前缀（如"负责…"）；
+    - 附件引用（如"具体岗位详见附件"——任务 11A.3）；
+    - 完整招聘说明正文；
+    - 仅描述招聘人数、对象或单位名单的句子。
     """
     if value is None:
         return False
@@ -651,6 +800,8 @@ def _is_valid_job_title_value(value: object) -> bool:
         return False
     if any(text.startswith(prefix) for prefix in _DESCRIPTION_PREFIXES):
         return False
+    if _is_attachment_reference(text):
+        return False
     return True
 
 
@@ -659,13 +810,46 @@ def _is_valid_job_title_value(value: object) -> bool:
 # 检查表 _HEADER_SEMANTIC_CHECKS 在 is_valid_url 定义之后构建。
 
 
+def _is_valid_location_value(value: object) -> bool:
+    """判断值是否为有效工作地点（任务 11A.3，表头驱动专用）。
+
+    比 is_city() 更宽松：采用受控排除策略——非空，且不是 URL、日期、
+    学历、届次、招聘类型或明显描述正文时，视为有效地点。
+
+    支持"北京上海苏州宁波广州深圳"等无显式分隔符的合理城市串，
+    不依赖永远列不全的城市白名单。
+    """
+    if value is None:
+        return False
+    text = str(value).strip()
+    if not text:
+        return False
+    # 排除非地点值
+    if _is_url(text) or _is_date(text):
+        return False
+    if _is_cohort(text) or _is_education(text):
+        return False
+    if _is_recruitment_keyword(text):
+        return False
+    # 排除描述性前缀（"负责…"等明显不是地点）
+    if any(text.startswith(prefix) for prefix in _DESCRIPTION_PREFIXES):
+        return False
+    # 排除附件引用
+    if _is_attachment_reference(text):
+        return False
+    # 受控排除通过 → 视为有效地点
+    return True
+
+
 def _check_header_value_reliability(
     row: Mapping, hm: HeaderMapping
 ) -> bool:
-    """检查行值与表头语义是否一致（任务 11A.1）。
+    """检查行值与表头语义是否一致（任务 11A.1/11A.3）。
 
     只有全部语义受控字段的非空值都通过校验时，表头才被视为可靠；
     旧模板数据（表头存在但个别行数据错位）会在此失败并回退固定列规则。
+
+    任务 11A.3：占位值（暂无说明/不限等）视为字段未提供，不阻塞分类。
     """
     for field_name, checker in _HEADER_SEMANTIC_CHECKS.items():
         col = hm.field_to_col.get(field_name)
@@ -673,6 +857,9 @@ def _check_header_value_reliability(
             continue
         value = row.get(col)
         if value is None or str(value).strip() == "":
+            continue
+        # 占位值视为"未提供"，不参与语义校验（任务 11A.3）
+        if _is_placeholder(value):
             continue
         if not checker(value):
             return False
@@ -719,12 +906,16 @@ _HEADER_CAMPAIGN_STD_FIELDS: tuple[str, ...] = (
 
 
 def _header_col_value_nonempty(row: Mapping, hm: HeaderMapping, field_name: str) -> bool:
-    """字段有映射且对应行值非空。"""
+    """字段有映射且对应行值非空（占位值视为空，任务 11A.3）。"""
     col = hm.field_to_col.get(field_name)
     if col is None:
         return False
     value = row.get(col)
-    return value is not None and str(value).strip() != ""
+    if value is None or str(value).strip() == "":
+        return False
+    if _is_placeholder(value):
+        return False
+    return True
 
 
 def _build_header_mapping_dict(
@@ -819,18 +1010,18 @@ def is_valid_url(value: object) -> bool:
     return bool(_URL_SCHEME_PATTERN.match(str(value).strip()))
 
 
-# 表头可靠性检查表（任务 11A.1）：映射到这些语义受控字段的非空值
+# 表头可靠性检查表（任务 11A.1/11A.3）：映射到这些语义受控字段的非空值
 # 必须通过语义校验，否则视为表头与数据不一致，回退固定列位置规则。
 # URL 类字段不参与可靠性检查：URL 有效性只在字段生成时校验
 # （无效 URL 不映射到标准字段），避免轻微链接问题导致整表回退。
+# deadline 不参与可靠性检查：无效日期只置空标准字段，不阻塞分类（任务 11A.3）。
+# 占位值（暂无说明/不限）已在 _check_header_value_reliability 中跳过。
 # 在 is_valid_url 定义之后构建，避免模块加载顺序问题。
 _HEADER_SEMANTIC_CHECKS: dict[str, Any] = {
     "recruitment_type": _is_recruitment_keyword,
     "target_cohort": _is_cohort,
     "education_requirement": _is_education,
-    "location": is_city,
-    "deadline": lambda v: _is_date(v)
-    or bool(re.match(r"^\d{4}-\d{1,2}-\d{1,2}$", str(v).strip())),
+    "location": _is_valid_location_value,
 }
 
 
@@ -1102,6 +1293,21 @@ def _apply_mapping(
             # 置空标准字段，原始值仍在 raw_data
             record[url_field] = None
 
+    # 占位值清理：占位值视为"未提供"，标准字段置空（任务 11A.3）
+    for ph_field in ("education_requirement", "recruitment_type",
+                      "target_cohort", "location", "deadline"):
+        if ph_field in record and _is_placeholder(record[ph_field]):
+            record[ph_field] = None
+
+    # deadline 校验：非法日期不写入标准字段，保留在 raw_data（任务 11A.3）
+    if "deadline" in record and record["deadline"] is not None:
+        dl = str(record["deadline"]).strip()
+        if dl and not (
+            _is_date(dl)
+            or bool(re.match(r"^\d{4}-\d{1,2}-\d{1,2}$", dl))
+        ):
+            record["deadline"] = None
+
     return record
 
 
@@ -1339,11 +1545,12 @@ def _has_mainland_job_signature(row: Mapping) -> bool:
     if not g_val or not str(g_val).strip():
         return False
     # H/I/J 分别符合招聘类型、届次、学历语义
+    # J（学历）为占位值或空值时不阻塞签名（任务 11A.3）
     if not _is_recruitment_keyword(h_val):
         return False
     if not _is_cohort(i_val):
         return False
-    if not _is_education(j_val):
+    if j_val and not _is_placeholder(j_val) and not _is_education(j_val):
         return False
     return True
 
