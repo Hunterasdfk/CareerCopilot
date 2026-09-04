@@ -385,10 +385,31 @@ _OPENABLE = frozenset({"discovered", "shortlisted"})
 _NON_DOWNGRADE = frozenset(
     {"assessment", "interview", "offer", "rejected", "withdrawn"}
 )
+_OPPORTUNITY_LIST_FIELDS = (
+    "id",
+    "record_type",
+    "display_title",
+    "job_title",
+    "job_categories",
+    "company_name",
+    "industry",
+    "recruitment_type",
+    "target_cohort",
+    "education_requirement",
+    "location",
+    "deadline",
+    "announcement_title",
+    "announcement_url",
+    "application_url",
+    "source_sheet",
+    "source_row",
+)
 
 
 class SupabaseDataService:
     """对 12A 五张表提供最小、可测试的云端访问接口。"""
+
+    _PAGE_SIZE = 1000
 
     def __init__(self, client: Any, *, admin_client: Any | None = None):
         self.client = client
@@ -404,6 +425,30 @@ class SupabaseDataService:
             return client.table(name)
         except Exception as exc:  # noqa: BLE001
             raise SupabaseDataError(f"无法访问云端表 {name}。") from exc
+
+    def _fetch_all_pages(
+        self,
+        query_factory: Callable[[], Any],
+        operation: str,
+    ) -> list[dict[str, Any]]:
+        """分页读取完整结果，避免 PostgREST 单次最多返回 1000 行的截断。"""
+
+        rows: list[dict[str, Any]] = []
+        start = 0
+        while True:
+            query = query_factory()
+            range_fn = getattr(query, "range", None)
+            if not callable(range_fn):
+                # 兼容不实现 range() 的轻量测试客户端。
+                return _execute(query, operation)
+            page = _execute(
+                range_fn(start, start + self._PAGE_SIZE - 1),
+                operation,
+            )
+            rows.extend(page)
+            if len(page) < self._PAGE_SIZE:
+                return rows
+            start += self._PAGE_SIZE
 
     def upsert_profile(self, user_id: str, display_name: str | None = None) -> dict[str, Any]:
         """创建或更新当前用户资料；不接受任意 app_metadata 权限字段。"""
@@ -421,26 +466,43 @@ class SupabaseDataService:
         return rows[0] if rows else payload
 
     def list_opportunities(self) -> list[dict[str, Any]]:
-        query = self._table("opportunities").select("*")
-        query = _chain(query, "order", "company_name", desc=False)
-        query = _chain(query, "order", "display_title", desc=False)
-        return _execute(query, "机会读取")
+        def query_factory() -> Any:
+            # Dashboard 不读取 raw_data、去重键或批次元数据，避免把整份源表
+            # 的 JSON 随每次页面加载传到客户端。
+            query = self._table("opportunities").select(
+                ",".join(_OPPORTUNITY_LIST_FIELDS)
+            )
+            query = _chain(query, "order", "company_name", desc=False)
+            query = _chain(query, "order", "display_title", desc=False)
+            return _chain(query, "order", "id", desc=False)
+
+        return self._fetch_all_pages(query_factory, "机会读取")
 
     def list_dedupe_keys(self) -> set[str]:
-        rows = _execute(self._table("opportunities").select("dedupe_key"), "去重键读取")
+        def query_factory() -> Any:
+            query = self._table("opportunities").select("dedupe_key")
+            return _chain(query, "order", "dedupe_key", desc=False)
+
+        rows = self._fetch_all_pages(query_factory, "去重键读取")
         return {str(row.get("dedupe_key")) for row in rows if row.get("dedupe_key")}
 
     def list_applications(self) -> list[dict[str, Any]]:
-        query = self._table("applications").select("*")
-        query = _chain(query, "order", "updated_at", desc=True)
-        return _execute(query, "申请记录读取")
+        def query_factory() -> Any:
+            query = self._table("applications").select("*")
+            query = _chain(query, "order", "updated_at", desc=True)
+            return _chain(query, "order", "id", desc=False)
+
+        return self._fetch_all_pages(query_factory, "申请记录读取")
 
     def list_application_events(self, application_id: str | None = None) -> list[dict[str, Any]]:
-        query = self._table("application_events").select("*")
-        if application_id:
-            query = _chain(query, "eq", "application_id", str(application_id))
-        query = _chain(query, "order", "occurred_at", desc=True)
-        return _execute(query, "申请时间线读取")
+        def query_factory() -> Any:
+            query = self._table("application_events").select("*")
+            if application_id:
+                query = _chain(query, "eq", "application_id", str(application_id))
+            query = _chain(query, "order", "occurred_at", desc=True)
+            return _chain(query, "order", "id", desc=False)
+
+        return self._fetch_all_pages(query_factory, "申请时间线读取")
 
     def create_application(
         self,
