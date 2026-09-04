@@ -26,6 +26,8 @@ class FakeBuilder:
         self.data = data
         self.calls = calls
         self.name = name
+        self.range_start = None
+        self.range_end = None
 
     def select(self, *columns, **kwargs):
         self.calls.append((self.name, "select", columns, kwargs))
@@ -55,8 +57,17 @@ class FakeBuilder:
         self.calls.append((self.name, "order", args, kwargs))
         return self
 
+    def range(self, start, end):
+        self.calls.append((self.name, "range", (start, end), {}))
+        self.range_start = start
+        self.range_end = end
+        return self
+
     def execute(self):
-        return SimpleNamespace(data=self.data)
+        data = self.data
+        if self.range_start is not None and self.range_end is not None:
+            data = data[self.range_start : self.range_end + 1]
+        return SimpleNamespace(data=data)
 
 
 class FakeClient:
@@ -206,6 +217,50 @@ def test_service_lists_cloud_opportunities_and_user_applications():
     assert service.list_opportunities()[0]["id"] == "opp-1"
     assert service.list_applications()[0]["status"] == "applied"
     assert any(call[1] == "order" for call in client.calls)
+
+
+def test_service_paginates_past_supabase_1000_row_response_limit():
+    opportunities = [
+        {
+            "id": f"opp-{index:04d}",
+            "company_name": "示例科技",
+            "dedupe_key": f"key-{index:04d}",
+        }
+        for index in range(2505)
+    ]
+    client = FakeClient({"opportunities": opportunities})
+    service = SupabaseDataService(client)
+
+    rows = service.list_opportunities()
+
+    assert len(rows) == 2505
+    assert rows[-1]["id"] == "opp-2504"
+    opportunity_selects = [
+        call
+        for call in client.calls
+        if call[0] == "opportunities" and call[1] == "select"
+    ]
+    assert opportunity_selects
+    assert all("raw_data" not in call[2][0] for call in opportunity_selects)
+    ranges = [
+        call[2]
+        for call in client.calls
+        if call[0] == "opportunities" and call[1] == "range"
+    ]
+    assert ranges == [(0, 999), (1000, 1999), (2000, 2999)]
+
+
+def test_service_reads_all_dedupe_keys_across_pages():
+    opportunities = [
+        {"dedupe_key": f"key-{index:04d}"}
+        for index in range(2101)
+    ]
+    service = SupabaseDataService(FakeClient({"opportunities": opportunities}))
+
+    keys = service.list_dedupe_keys()
+
+    assert len(keys) == 2101
+    assert "key-2100" in keys
 
 
 def test_create_application_only_sends_business_fields_and_adds_event():
