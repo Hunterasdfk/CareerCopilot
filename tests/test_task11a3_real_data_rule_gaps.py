@@ -31,10 +31,15 @@ from services.layout_detector import (
     LAYOUT_MAINLAND_JOB,
     _is_cohort,
     _is_recruitment_keyword,
+    _is_valid_deadline_value,
     _is_valid_job_title_value,
     _is_valid_location_value,
     _is_placeholder,
+    detect_junior_global,
     detect_mainland,
+    detect_sg,
+    detect_uk,
+    is_city,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -588,6 +593,110 @@ class TestNoPrivateDataAccess:
             source = path.read_text(encoding="utf-8")
             assert "data/private" not in source, path
             assert "智联" not in source, path
+
+
+# ---------------------------------------------------------------------------
+# 13. 安全复核：地点排除、招聘正文和截止日期兼容
+# ---------------------------------------------------------------------------
+
+
+class TestSafetyReviewLocationNegatives:
+    """表头明确时也不能把普通业务文本当成地点。"""
+
+    @pytest.mark.parametrize("value", [
+        "招聘若干",
+        "具体见正文",
+        "岗位详情",
+        "部门待定",
+        "工作地点详见公告",
+        "若干岗位",
+        "相关专业",
+        "综合管理",
+        "技术支持方向",
+        "abcdef",
+        "北京岗位详情",
+    ])
+    def test_non_location_text_is_rejected(self, value):
+        assert _is_valid_location_value(value) is False
+        if value == "北京岗位详情":
+            assert is_city(value) is False
+
+
+class TestSafetyReviewRecruitmentDescriptions:
+    """招聘说明、人数和对象信息应进入 campaign，而不是 job。"""
+
+    @pytest.mark.parametrize("value", [
+        "本次面向应届毕业生招聘工作人员",
+        "此次公开招聘专业人才，报名方式见公告。",
+        "招聘人数：若干",
+        "招聘对象：2026届毕业生",
+        "招聘单位：各所属单位",
+        "单位名单：详见公告附件",
+    ])
+    def test_description_is_campaign_not_job(self, value):
+        assert _is_valid_job_title_value(value) is False
+        row = _make_mainland_row(
+            job_title=value,
+            announcement="示例单位招聘公告",
+        )
+        result = detect_mainland(row, 300, headers=MAINLAND_HEADERS_STANDARD)
+        assert result["record_type"] == "campaign"
+        assert result.get("job_title") is None
+
+
+class TestSafetyReviewDeadlines:
+    """保留有效日期和开放式截止语句，只清理真正非法值。"""
+
+    @pytest.mark.parametrize("value", [
+        "2026-04-01 00:00:00",
+        "2026-04-01T09:30:00",
+        "2026/04/01",
+        "2026年4月1日",
+        "尽快投递",
+        "招满为止",
+        "长期有效",
+    ])
+    def test_valid_deadline_is_preserved(self, value):
+        assert _is_valid_deadline_value(value)
+        row = _make_mainland_row(job_title="示例工程师", deadline=value)
+        result = detect_mainland(row, 301, headers=MAINLAND_HEADERS_STANDARD)
+        assert result["deadline"] == value
+
+    @pytest.mark.parametrize("value", ["20260-3-30", "2026-13-40"])
+    def test_invalid_deadline_is_cleared(self, value):
+        assert _is_valid_deadline_value(value) is False
+        row = _make_mainland_row(job_title="示例工程师", deadline=value)
+        result = detect_mainland(row, 302, headers=MAINLAND_HEADERS_STANDARD)
+        assert result["deadline"] is None
+        assert result["raw_data"]["K"] == value
+
+
+class TestSafetyReviewOtherSheets:
+    """11A.3 清理规则不得改变其他工作表的标准字段。"""
+
+    def test_uk_open_deadline_is_preserved(self):
+        row = {
+            "B": "互联网", "C": "示例科技A", "D": "示例工程师",
+            "F": "Graduate Programme", "G": "2026届", "H": "本科",
+            "I": "伦敦", "J": "招满为止", "K": "https://example.com/uk",
+        }
+        assert detect_uk(row, 2)["deadline"] == "招满为止"
+
+    def test_sg_placeholder_deadline_is_preserved(self):
+        row = {
+            "B": "互联网", "C": "示例科技A", "D": "示例工程师",
+            "F": "Graduate Programme", "G": "2026届", "H": "本科",
+            "I": "暂无说明", "J": "https://example.com/sg",
+        }
+        assert detect_sg(row, 2)["deadline"] == "暂无说明"
+
+    def test_junior_global_free_text_deadline_is_preserved(self):
+        row = {
+            "B": "全球", "C": "互联网", "D": "示例科技A",
+            "E": "暑期实习", "F": "示例开发实习生", "G": "本科",
+            "I": "2027届", "K": "rolling", "L": "https://example.com/junior",
+        }
+        assert detect_junior_global(row, 2)["deadline"] == "rolling"
 
 
 if __name__ == "__main__":

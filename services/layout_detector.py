@@ -43,6 +43,7 @@ import re
 import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Any
 
 # ---------------------------------------------------------------------------
@@ -242,7 +243,44 @@ _LOCATION_SEPARATORS_PATTERN = re.compile(r"[/\-、,，;；\s]+")
 # 非地点短文本排除（任务 11A.3）：这些值不是地点，通过排除策略后仍需拒绝
 _NON_LOCATION_SHORT_VALUES: frozenset[str] = frozenset({
     "可议", "面议", "详谈", "详见", "待定", "未知",
+    "招聘若干", "具体见正文", "岗位详情", "部门待定", "若干岗位",
+    "相关专业", "综合管理", "技术支持方向",
 })
+
+# 即使字段表头明确为“工作地点”，这些语义也足以证明单元格发生了错位。
+# 保持为短语级排除，避免误伤“北京经济技术开发区”等真实地名。
+_NON_LOCATION_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"(?:工作)?地点.*(?:详见|参见|见).*(?:公告|正文|附件)"),
+    re.compile(r"(?:招聘|岗位|职位|部门|专业|单位|人数|对象).*(?:详情|说明|待定|若干)"),
+    re.compile(r"(?:具体|详情).*(?:见|详见).*(?:正文|公告|附件)"),
+    re.compile(r"^(?:综合管理|技术支持方向|相关专业|若干岗位)$"),
+)
+
+
+def _has_non_location_semantics(text: str) -> bool:
+    """地点字段中出现明显的岗位/公告语义时拒绝该值。"""
+    if text in _NON_LOCATION_SHORT_VALUES:
+        return True
+    return any(pattern.search(text) for pattern in _NON_LOCATION_PATTERNS)
+
+
+def _is_known_region_concatenation(text: str) -> bool:
+    """识别“北京上海苏州”这类完全由已知地名拼接而成的字符串。
+
+    不能使用简单的 ``region in text``，否则“北京岗位详情”也会被当成地点。
+    """
+    if not text:
+        return False
+    regions = sorted(_KNOWN_REGIONS | _SPECIAL_REGIONS, key=len, reverse=True)
+    offset = 0
+    matched = 0
+    while offset < len(text):
+        region = next((item for item in regions if text.startswith(item, offset)), None)
+        if region is None:
+            return False
+        offset += len(region)
+        matched += 1
+    return matched >= 2
 
 
 def _is_cohort(value: object) -> bool:
@@ -429,7 +467,7 @@ def _is_single_region(text: str) -> bool:
         return False
     if _is_placeholder(text):
         return False
-    if text in _NON_LOCATION_SHORT_VALUES:
+    if _has_non_location_semantics(text):
         return False
     # 拒绝含描述关键词的文本（如"普通描述"不是地点）
     if "描述" in text or "正文" in text:
@@ -445,8 +483,8 @@ def _is_single_region(text: str) -> bool:
         return True
     if any(text.endswith(suffix) for suffix in _REGION_SUFFIXES):
         return True
-    # 包含已知地区词为子串 → 视为可识别（支持无分隔符城市串，任务 11A.3）
-    if any(region in text for region in _KNOWN_REGIONS):
+    # 整串都可由已知地区词组成时才接受，避免“北京岗位详情”误判。
+    if _is_known_region_concatenation(text):
         return True
     # 其余一律拒绝（固定列路径不使用宽松受控排除）
     return False
@@ -766,6 +804,18 @@ _ATTACHMENT_REFERENCE_PATTERNS: tuple[str, ...] = (
     "具体岗位详见",
     "职位信息详见",
     "详见招聘",
+    "详情见附件",
+    "详情请见附件",
+)
+
+# 招聘公告正文或统计说明不是岗位名称。这里使用受控语义模式，不以长度
+# 一刀切，避免拒绝合法的长岗位列表。
+_NON_JOB_TITLE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^(?:本次|此次|现|面向).*(?:招聘|招募).*(?:人员|人才|毕业生|实习生)"),
+    re.compile(r"^(?:招聘|招募)(?:人数|对象|范围|条件|要求|单位|计划|说明|信息)"),
+    re.compile(r"(?:招聘人数|招聘对象|招聘单位|单位名单|招聘范围)\s*[:：]"),
+    re.compile(r"^(?:具体|相关)?(?:岗位|职位|专业).*(?:详见|参见|见).*(?:附件|公告|正文)"),
+    re.compile(r"^(?:招聘|岗位|职位)(?:详情|说明|信息)$"),
 )
 
 
@@ -775,6 +825,19 @@ def _is_attachment_reference(value: object) -> bool:
         return False
     text = str(value).strip()
     return any(pattern in text for pattern in _ATTACHMENT_REFERENCE_PATTERNS)
+
+
+def _is_recruitment_description(value: object) -> bool:
+    """判断单元格是否是招聘说明正文而不是岗位名称。"""
+    if value is None:
+        return False
+    text = str(value).strip()
+    if not text:
+        return False
+    if any(pattern.search(text) for pattern in _NON_JOB_TITLE_PATTERNS):
+        return True
+    # 完整句子并同时包含招聘语义时按正文处理；岗位列表通常没有句号。
+    return bool(re.search(r"[。！？!?]", text) and re.search(r"招聘|招募|报名", text))
 
 
 def _is_valid_job_title_value(value: object) -> bool:
@@ -801,6 +864,8 @@ def _is_valid_job_title_value(value: object) -> bool:
     if any(text.startswith(prefix) for prefix in _DESCRIPTION_PREFIXES):
         return False
     if _is_attachment_reference(text):
+        return False
+    if _is_recruitment_description(text):
         return False
     return True
 
@@ -831,14 +896,22 @@ def _is_valid_location_value(value: object) -> bool:
         return False
     if _is_recruitment_keyword(text):
         return False
+    if _is_placeholder(text) or _has_non_location_semantics(text):
+        return False
     # 排除描述性前缀（"负责…"等明显不是地点）
     if any(text.startswith(prefix) for prefix in _DESCRIPTION_PREFIXES):
         return False
     # 排除附件引用
     if _is_attachment_reference(text):
         return False
-    # 受控排除通过 → 视为有效地点
-    return True
+    # 明确城市、地区后缀和完全由城市名拼接的值优先接受。
+    if is_city(text):
+        return True
+    # 表头可靠时允许白名单外的简短中文地名（如“雄安”“横琴”），但拒绝
+    # ASCII 占位文本、正文标点和过长描述。
+    if len(text) > 20 or re.search(r"[。！？!?：:]", text):
+        return False
+    return bool(re.fullmatch(r"[\u3400-\u9fff·]+", text))
 
 
 def _check_header_value_reliability(
@@ -1008,6 +1081,43 @@ def is_valid_url(value: object) -> bool:
     if value is None:
         return False
     return bool(_URL_SCHEME_PATTERN.match(str(value).strip()))
+
+
+_DEADLINE_PATTERN = re.compile(
+    r"^\s*(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})日?"
+    r"(?:[ T](\d{1,2}):(\d{2})(?::(\d{2})(?:\.\d{1,6})?)?)?\s*$"
+)
+_OPEN_DEADLINE_VALUES: frozenset[str] = frozenset(
+    {
+        "尽快投递", "尽快申请", "招满为止", "招满即止", "额满为止",
+        "长期有效", "长期招聘", "持续招聘", "滚动招聘",
+    }
+)
+
+
+def _is_valid_deadline_value(value: object) -> bool:
+    """接受真实日期、pandas 时间戳字符串和受控开放式截止语句。"""
+    if value is None:
+        return False
+    text = str(value).strip()
+    if not text:
+        return False
+    if text in _OPEN_DEADLINE_VALUES:
+        return True
+    match = _DEADLINE_PATTERN.fullmatch(text)
+    if match is None:
+        return False
+    year, month, day, hour, minute, second = match.groups()
+    try:
+        date(int(year), int(month), int(day))
+        if hour is not None:
+            if int(hour) > 23 or int(minute) > 59:
+                return False
+            if second is not None and int(second) > 59:
+                return False
+    except ValueError:
+        return False
+    return True
 
 
 # 表头可靠性检查表（任务 11A.1/11A.3）：映射到这些语义受控字段的非空值
@@ -1293,20 +1403,20 @@ def _apply_mapping(
             # 置空标准字段，原始值仍在 raw_data
             record[url_field] = None
 
-    # 占位值清理：占位值视为"未提供"，标准字段置空（任务 11A.3）
-    for ph_field in ("education_requirement", "recruitment_type",
-                      "target_cohort", "location", "deadline"):
-        if ph_field in record and _is_placeholder(record[ph_field]):
-            record[ph_field] = None
-
-    # deadline 校验：非法日期不写入标准字段，保留在 raw_data（任务 11A.3）
-    if "deadline" in record and record["deadline"] is not None:
-        dl = str(record["deadline"]).strip()
-        if dl and not (
-            _is_date(dl)
-            or bool(re.match(r"^\d{4}-\d{1,2}-\d{1,2}$", dl))
+    # 任务 11A.3 的占位值与 deadline 容错仅属于中国大陆规则。其他工作表
+    # 必须维持原始映射行为，避免公共构造函数产生跨表回归。
+    if source_sheet == SHEET_MAINLAND:
+        for ph_field in (
+            "education_requirement", "recruitment_type", "target_cohort",
+            "location", "deadline",
         ):
-            record["deadline"] = None
+            if ph_field in record and _is_placeholder(record[ph_field]):
+                record[ph_field] = None
+
+        # 非法日期不写入标准字段，原值仍完整保留在 raw_data。
+        if "deadline" in record and record["deadline"] is not None:
+            if not _is_valid_deadline_value(record["deadline"]):
+                record["deadline"] = None
 
     return record
 
